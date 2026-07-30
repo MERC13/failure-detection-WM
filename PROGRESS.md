@@ -152,3 +152,71 @@ Phase 1 is unblocked.
 
 1. Decide the demo-replay-fidelity question above.
 2. Phase 1 per WORKFLOW.md.
+
+---
+
+## 2026-07-30 — Phase 0 addendum: machine move prepared
+
+Phase 0 signed off and committed as `8b8a80c`. This addendum covers the handoff to the GPU
+machine, done *before* Phase 1 rather than after. No modeling code written.
+
+### Why move now rather than after Phase 1
+
+Measured on the WSL2 box: DINOv2-base at **9.9 img/s** (224px) and **29.6 img/s** (128px);
+simulator at **53 steps/s**. Phase 1 is feasible here (~13 min to encode a task's demos, ~16
+min for a 50-rollout policy eval) but Phase 2 dynamics training is not, so the move was
+inevitable. The deciding argument was not speed:
+
+**The encoding cache key identifies neither machine nor device.** CPU and CUDA latents differ
+in the low bits under the same `(episode_id, frame_idx, encoder_cfg_hash)`. Moving after
+Phase 1 would silently poison every cached latent — the exact failure CLAUDE.md warns about,
+in a form the hash cannot catch. Nothing is cached yet, so moving today costs nothing.
+
+Secondary: I1 and I5 were proven on *this* box only, and it renders through software
+rasterization while a GPU box uses hardware EGL. That is a different code path, so G0 must be
+re-run there regardless.
+
+### What landed
+
+- `scripts/setup_env.sh` — idempotent bootstrap: toolchain check (exits with the exact apt
+  command if missing), venv with a `virtualenv` fallback for absent `ensurepip`,
+  hardware-matched torch (CPU index only when no GPU is present), pinned deps,
+  `~/.libero/config.yaml`, single-suite demo download, then runs G0.
+  **Verified by running it here end-to-end**: every step correctly detected already-done work
+  and G0 re-passed 6/6 with the identical rollout digest `4742366b…`.
+- `SESSION_HANDOFF.md` — bootstrap doc for the new session: gate state, first commands, the
+  five traps, the two open questions, and the rules easiest to violate at a phase boundary.
+- SPEC.md §4.1 amended on two counts (below).
+
+### Corrections to SPEC.md §4.1
+
+1. **"Keeping tokens costs nothing now" was wrong.** At 224px DINOv2-base emits 257×768 —
+   786 KB/frame fp32, so 6.1 GB for one task's 7,808 frames, and §4.4 wants ≥3 tasks. Tokens
+   remain canonical, but `output_dtype` is now an explicit config field defaulting to fp16
+   (≈3 GB/task). The encoder *returns* that dtype rather than storing a narrowed copy, so the
+   G1 invariant "cache hit is bit-identical to a fresh encode" stays literally true.
+2. **The cache key was under-specified.** It now hashes all encoder config fields plus model
+   id, revision, output dtype, `torch.__version__`, and device kind; and the cache writes a
+   `fingerprint.json` whose mismatch is a hard error rather than a silent recompute.
+
+### What surprised me
+
+10. **`libero_object` demo actions have a strictly binary gripper dimension.** Dim 6 takes
+    exactly `{-1, +1}` across the demos — nothing in between. CLAUDE.md warned not to apply
+    symmetric L2 to the gripper; the data is stronger than that, and it means the BC head
+    should treat dim 6 as a classification target (BCE), not a regression one. Recorded here
+    so the Phase 1 choice is visible rather than buried in a loss function.
+11. **Demo episodes are short and uniform**: 50 demos/task, lengths 136–196 (mean 156),
+    7,808 frames per task, images 128×128 native. Encoding at DINOv2's 224 upsamples them.
+
+### Gate state
+
+**G0: PASS** on the WSL2 CPU box, run three times with identical results. **Not yet run
+anywhere else** — that is the first task on the GPU machine.
+
+### Next
+
+1. On the GPU box: `bash scripts/setup_env.sh`, then `make test-slow` and `make lint`.
+   **If I1 fails there, stop and report.**
+2. Answer the demo-replay-fidelity question (SPEC.md §8) before training on the demos.
+3. Phase 1: encoder + cache + data + BC policy + G1, per the approved plan.

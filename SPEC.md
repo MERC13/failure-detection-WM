@@ -141,11 +141,32 @@ exists without the config that produced it.
 Frozen DINOv2-base. Input a resized RGB frame, output patch tokens `(N, D)`.
 
 - Keep patch tokens as the canonical representation; provide `pool()` for the mean-pooled
-  vector. The pooled version is what the search uses by default; keeping tokens costs
-  nothing now and enables the spatial-attribution extension later.
+  vector. The pooled version is what the search uses by default, and keeping tokens enables
+  the spatial-attribution extension later.
 - Encoder weights never train. A test asserts `requires_grad == False` everywhere.
 - Cache encodings to disk keyed by `(episode_id, frame_idx, encoder_cfg_hash)`. This is the
   difference between a 20-minute experiment loop and a 4-hour one.
+
+**Amended 2026-07-30 (Phase 0), on two counts this section originally got wrong:**
+
+*Tokens are not free.* At DINOv2's native 224px the model emits 257 tokens × 768 dims —
+786 KB per frame in fp32, so one `libero_object` task's 7,808 demo frames is **6.1 GB**, and
+§4.4 wants ≥3 tasks. The earlier claim that "keeping tokens costs nothing" was wrong. Tokens
+stay canonical, but `output_dtype` is an explicit encoder config field defaulting to
+`float16` (≈3 GB/task). The encoder *returns* that dtype rather than computing fp32 and
+storing narrower, so "a cache hit is bit-identical to a fresh encode" stays literally true
+instead of true-modulo-a-cast. Pooled vectors are derived on demand (24 MB/task).
+
+*The cache key does not identify the hardware.* `(episode_id, frame_idx, encoder_cfg_hash)`
+names neither machine nor device, so latents computed on CPU and on CUDA collide under the
+same key while differing in the low bits — silent cache poisoning that the hash cannot catch.
+Therefore:
+
+- `encoder_cfg_hash` covers **all** encoder config fields plus model id, model revision,
+  output dtype, `torch.__version__`, and a device-kind tag (`cpu` / `cuda`).
+- The cache writes `fingerprint.json` beside its data. A fingerprint mismatch is a **hard
+  error, not a silent recompute** — recomputing quietly would hide that two runs' numbers came
+  from different hardware.
 
 **Deliberate deviation:** do not start with V-JEPA 2-AC ViT-g. Published action-conditioned
 predictor training at that scale used a single H200 with large batches. The scientific claim
