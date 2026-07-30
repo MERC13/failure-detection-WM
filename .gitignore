@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Environment lives outside the repo (repo is on a /mnt/c 9p mount; installs there are slow).
+.venv/
+venv/
+
+# Datasets and encoding caches are large and reproducible from download scripts.
+data/
+cache/
+
+# results/ is gitignored except results/figures/ (SPEC.md §3).
+results/*
+!results/figures/

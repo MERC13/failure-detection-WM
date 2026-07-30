@@ -1,0 +1,56 @@
+# Phase 0 pinned environment.  Python 3.10.12, linux.
+#
+# The venv lives outside the repo (the repo is on a /mnt/c 9p mount where installing
+# torch/mujoco is dramatically slower):
+#
+#   python3 -m virtualenv ~/.venvs/failure-detection-WM
+#   ~/.venvs/failure-detection-WM/bin/pip install torch torchvision \
+#       --index-url https://download.pytorch.org/whl/cpu
+#   ~/.venvs/failure-detection-WM/bin/pip install -r requirements.txt
+#
+# System prerequisites (see PROGRESS.md): build-essential cmake libegl1-mesa-dev
+# libgl1-mesa-dev libosmesa6.  egl_probe is a C extension and will not build without them.
+#
+# Before first use, provision LIBERO's machine-global config non-interactively — importing
+# libero with no ~/.libero/config.yaml blocks on an input() prompt (see PROGRESS.md).
+#
+# Versions below are the direct dependencies, with comments marking the pins that are
+# load-bearing rather than incidental.  `requirements.lock.txt` is the full transitive
+# `pip freeze` of the environment that passed G0 on 2026-07-30 — install from that to
+# reproduce exactly; this file is the human-readable why.
+
+# LIBERO: the Hugging Face maintained fork (huggingface/lerobot-libero), not the original
+# Lifelong-Robot-Learning repo.  Chosen because it installs on Python 3.10 and preserves the
+# API this project depends on (libero.libero.benchmark, OffScreenRenderEnv, set_init_state,
+# get_task_init_states).  Simulation assets download from the Hub on first use rather than
+# being bundled.
+libero==0.1.1
+
+# LOAD-BEARING: robosuite must stay on 1.4.x.  Version 1.5 removed SingleArmEnv, which
+# LIBERO imports, so robosuite>=1.5 breaks `import libero` outright.
+robosuite==1.4.0
+
+bddl==1.0.1
+
+# LOAD-BEARING: mujoco must stay <= 3.3.7.  robosuite declares `mujoco` with NO upper bound,
+# so a fresh install resolves to the latest (3.11.0 as of 2026-07-30) and dies on the first
+# env construction with `AttributeError: 'MjData' object has no attribute 'qM'` —
+# robosuite/controllers/base_controller.py:156 calls mujoco.mj_fullM(..., self.sim.data.qM).
+# MjData.qM was renamed to MjData.M in mujoco 3.4.0.  3.3.7 is the newest version that works.
+mujoco==3.3.7
+
+robomimic==0.2.0
+
+h5py==3.16.0
+numpy==2.2.6
+PyYAML==6.0.3
+
+# LOAD-BEARING: install torch from the pytorch CPU index (see header), NOT from PyPI.  This
+# host has no GPU, and the PyPI wheel pulls ~5 GB of CUDA 13 wheels (nvidia-cublas, cudnn,
+# nccl, cuda-toolkit, triton) that cannot be used here.  Phase 1+ training moves to the
+# rented A100 per SPEC.md §2 and will need a cu-* build instead.
+torch==2.13.0
+torchvision==0.28.0
+
+pytest==9.1.1
+ruff==0.16.0
