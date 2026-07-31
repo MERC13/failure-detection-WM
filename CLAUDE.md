@@ -19,23 +19,38 @@ make env-check       # G0 gate — must pass before anything else
 make test            # pytest, fast tests only
 make test-slow       # includes sim-dependent tests
 make lint            # ruff + format
+
+make g1-check POLICY_RUN=<train_policy run_id> COLLECT_RUN=<collect_demos run_id>
 ```
 
 Training and experiment entrypoints are the scripts in `scripts/`, each taking
 `--config configs/<name>.yaml --seed N --run-id <id>`.
+
+The venv lives **outside** the repo at `~/.venvs/failure-detection-WM` (the repo is on a slow
+`/mnt/c` 9p mount). `make` handles this; running a script directly needs
+`PYTHONPATH=$PWD ~/.venvs/failure-detection-WM/bin/python …`.
+
+Gates read numbers from completed runs rather than recomputing them, so a gate can fail simply
+because the run predates a metric. Re-run the script; do not make the gate re-derive the value.
 
 ## The five rules that matter
 
 1. **Never edit `cfe/eval/` after Phase 2 is signed off.** Those files hold the metrics and
    the replay protocol. If you believe there is a bug in them, stop and ask — do not fix it
    inline. A change there rewrites every prior result. If I approve a change, log it in
-   `CHANGELOG.md` with the reason.
+   `CHANGELOG.md` with the reason. `CHANGELOG.md` is the log for **any** change to a metric,
+   threshold, gate, or the replay protocol, wherever it lives — not only `cfe/eval/`.
 2. **A number is only real if it came from simulator replay.** Latent-space goal distance is
    a search objective, never a result. Never report, log, or summarize latent distance as
    though it measured success.
 3. **Never weaken a metric, threshold, or gate to make a run pass.** If a gate fails, say it
    failed and tell me why you think it failed. A failing gate is information. Silently
    relaxing it destroys the project. This is the single most damaging thing you could do here.
+   This extends to *evaluation protocol* knobs, not just thresholds: `eval.max_steps` moves the
+   BC success rate as surely as retraining does, because every failure is a timeout. If you
+   believe a criterion is genuinely miscalibrated, bring me the measurement that shows it and
+   let me decide — do not amend it yourself. Every such change goes in `CHANGELOG.md` with its
+   reasoning and its rejected alternatives.
 4. **Every result writes a config snapshot** to `results/runs/<run_id>/` alongside
    `metrics.jsonl`. No orphan numbers in the terminal.
 5. **Every entrypoint takes an explicit seed and is deterministic.** Same seed + same config
@@ -67,9 +82,21 @@ replay bugs. If a table is missing them it is not finished, even if I forgot to 
 - Actions are 7-DOF: 6 end-effector delta + 1 gripper. The gripper dimension is not
   continuous in the same sense as the others — do not apply symmetric L2 penalties to it
   without flagging that choice.
-- `results/` is gitignored except `results/figures/`.
+- `results/` is gitignored except `results/figures/`. Ignore patterns for `data/` and `cache/`
+  are **root-anchored** (`/data/`) on purpose: unanchored, they also match `cfe/data/` and
+  silently drop source code from commits.
+- Only the `encoder:` block of `configs/encoder.yaml` is hashed into the cache key. `data:` and
+  `runtime:` are not, so adding fields there will not invalidate a 2.8 GB cache.
 - Failure episodes carry a `cause` tag that is `null` for naturally occurring failures and a
   string for injected ones. Code that assumes non-null will crash on half the dataset.
+- **Observation keys lie in two ways that have already cost a full re-run each.**
+  `<object>_to_robot0_eef_pos` is object *minus* end-effector, so it moves when the arm moves,
+  not the object — filter it out when you want absolute positions. And objects settle under
+  gravity at reset: ~0.10 m vertically, ~0.001 m horizontally, before the robot does anything.
+  Any "did the robot touch it" test must be horizontal and must clear that floor.
+- Rendering runs on the CPU through mesa's `llvmpipe` (~9 sim steps/s) even though CUDA is
+  available for the encoder. Rollouts, not encoding, are the bottleneck: budget ~30 min for
+  50 rollouts of 300 steps.
 
 ## Working style
 
@@ -82,6 +109,11 @@ replay bugs. If a table is missing them it is not finished, even if I forgot to 
   exception, or add a fallback path to make output appear. I would rather see a stack trace
   than a plausible number.
 - If you find yourself about to write "this should work" without running it, run it.
+- **Distrust a new metric until something independent agrees with it.** The Phase 1
+  failure-mode breakdown took four runs to become correct, and its first two versions produced
+  confident, plausible, wrong numbers that were caught only because they contradicted a
+  separate diagnostic. When you add a measurement, measure its noise floor first and check it
+  against a signal you already trust before reporting anything from it.
 
 ## Scope discipline
 

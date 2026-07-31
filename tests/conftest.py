@@ -14,6 +14,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 
 @pytest.fixture(scope="session")
+def repo_root() -> Path:
+    return REPO_ROOT
+
+
+@pytest.fixture(scope="session")
 def cfg() -> dict:
     config = yaml.safe_load((REPO_ROOT / "configs" / "env.yaml").read_text())
     # MUJOCO_GL must be set before MuJoCo is imported by any check.

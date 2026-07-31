@@ -9,8 +9,10 @@ __pycache__/
 venv/
 
 # Datasets and encoding caches are large and reproducible from download scripts.
-data/
-cache/
+# Anchored to the repo root: an unanchored `data/` also matches `cfe/data/`, which would
+# silently drop source code from every commit and break a fresh clone on import.
+/data/
+/cache/
 
 # results/ is gitignored except results/figures/ (SPEC.md §3).
 results/*

@@ -220,3 +220,386 @@ anywhere else** — that is the first task on the GPU machine.
    **If I1 fails there, stop and report.**
 2. Answer the demo-replay-fidelity question (SPEC.md §8) before training on the demos.
 3. Phase 1: encoder + cache + data + BC policy + G1, per the approved plan.
+
+---
+
+## 2026-07-30 — Phase 1: encoder + cache, demo materialisation, BC policy
+
+**Status: G1 FAIL (4/6). Both failures are findings about the data and the task, not defects
+in the Phase 1 code.** Artifacts in `results/runs/{p1-demos,p1-bc,g1-phase1}/`.
+
+```
+[PASS] encoder_frozen               0 params require grad
+[PASS] cache_populated              48 episodes, all with metadata
+[PASS] cache_bit_identical          fresh replay+encode == cache, np.array_equal
+[PASS] fingerprint_mismatch_raises  tamper raises; identical fingerprint reopens cleanly
+[FAIL] expert_replay_success        48/50 (demo_27, demo_31 do not reproduce success)
+[FAIL] bc_success_band              72.0% vs the 40-70% band
+G1: FAIL (2/6 checks failed)
+```
+
+`make test-slow` → 33 passed (24 fast + 9 slow). `make lint` → clean, 20 files.
+
+### The machine changed; G0 was re-run here first
+
+This is not the Phase 0 box. Python 3.12.3 (not 3.10.12), torch 2.13.0+cu130 with CUDA
+available, RTX 4070 Laptop 8.59 GB. **G0 re-passed 6/6 on this machine** before any Phase 1
+work started; I1 holds bit-exactly here. The pinned requirements resolved on 3.12 without
+conflict.
+
+One setup obstacle worth recording: every tracked file arrived with **CRLF line endings**
+(the repo lives on `/mnt/c`), which would have made `bash scripts/setup_env.sh` die on
+`$'\r': command not found`. Normalised all 16 files to LF and verified content byte-identical
+to HEAD via `git hash-object`. A `.gitattributes` with `* text=auto eol=lf` would stop this
+recurring; not added yet.
+
+### The two G1 failures
+
+**1. `expert_replay_success` — 48/50.** `demo_27` and `demo_31` replay to `reward_sum = 0.0`
+and `success = False`, deterministically (identical across two runs). Not near-misses: the
+task never registers success at any timestep. SPEC.md §8 requires the success flag be
+reproduced *exactly*, so this check fails rather than being softened to a rate threshold.
+Both episodes are excluded from the cache — `collect_demos.py` refuses to cache an episode
+whose replay did not succeed. **Consequence for later phases: `expert_oracle` (SPEC.md §6),
+described as the upper bound, is capped near 96% on this task rather than 100%.**
+
+**2. `bc_success_band` — 72.0%, band 40-70%.** Measured over 50 simulator rollouts (36
+success / 14 failure). Above the band by 2 points. **Not tuned in either direction.** Tuning
+it down to land in the band would be as much a manipulation of the measurement as tuning it
+up, and which way to go is a call for the project owner, not for me. Note the phase still
+yields failures at this rate (28%), which is what the band exists to guarantee.
+
+### The demo-replay-fidelity question is answered (it was blocking Phase 3)
+
+Measured directly, and the answer has three parts that must not be conflated:
+
+| Property | Result |
+|---|---|
+| `set_init_state(states[0])` reproduces the state | **Bit-exact**, `max\|Δ\| = 0.0`. I1 is solid |
+| Replaying `actions[t]` reproduces `states[t]` | **No.** Drift > 1e-3 by the first step, peaks 4.5-10.6 |
+| Replaying `actions[t]` reproduces *success* | **Mostly.** 48/50 |
+
+So the demos are valid expert **action** sequences, but their recorded **state trajectories
+are not ground truth and must never be used as targets**. This carries into Phase 2 (dynamics
+training targets must come from replay, not from recorded states) and Phase 3.
+`tests/test_demo_replay.py` pins all three facts, including a test that fails loudly if
+recorded states ever *start* reproducing — that would mean the physics changed and this
+guidance is stale.
+
+### What surprised me
+
+12. **The renderer is software, on a machine with a GPU.** `MUJOCO_GL=egl` resolves through
+    robosuite's own `EGLGLContext` to **`llvmpipe` (Mesa 25.2.8)** — mesa is the only
+    registered EGL vendor and `libEGL_nvidia` is absent. The GPU serves CUDA (DINOv2 encodes
+    at 144 img/s vs 9.9 on the Phase 0 CPU box) but not MuJoCo. **Rendering, not encoding, is
+    now the bottleneck**: ~9 steps/s, so 50 rollouts took 23 minutes and demo collection 18.
+    Phase 2 should budget against rendering, not against the GPU.
+13. **The i5 digest differs across machines and that is not an I5 violation.** `8cfe0513…`
+    here vs `4742366b…` on the Phase 0 box. Cause: both boxes software-rasterise but with
+    *different mesa drivers*, so pixels differ (`n_unique` 249→253, mean 104.291→104.049).
+    Physics is unaffected — `sim_state` and physics-observation digests are byte-identical
+    across `egl` and `osmesa` here. I5 as the gate tests it (determinism within a machine)
+    holds; cross-machine pixel reproducibility was never tested and does not hold.
+14. **MuJoCo frames are upside down.** Verified visually: the as-returned `agentview_image`
+    has the robot hanging from the bottom of the frame. Recorded demo frames share the same
+    orientation, so the two are consistent — but DINOv2 is pretrained on upright photographs,
+    and feeding it inverted scenes is a silent quality loss, not a crash. The encoder now
+    flips before normalising (`flip_vertical`, hashed).
+15. **Recorded demo frames ≠ our render of the identical state.** With the sim state applied
+    bit-exactly, demo frames still differ from ours (mean 139.1 vs 103.3, corr 0.80) — a
+    lighting/asset difference in the recording setup. Training on recorded frames and
+    deploying on live ones would have put a domain gap between train and deploy. Observations
+    are therefore regenerated by replay (~20 s/episode). This is the single decision most
+    likely to have quietly capped the BC policy had it gone the other way.
+16. **Encoding is not batch-invariant on GPU.** `encode(x[:1])` differs from `encode(x)[:1]`
+    by up to 7.8e-3 (one fp16 ULP) against a token std of 1.78. `batch_size` is therefore
+    hashed into the cache key. It also means rollout features (encoded one frame at a time)
+    differ from training features (batch 64) at ULP level — noted in `rollout()`, and it
+    cannot affect a reported result because results come from simulator replay (I2).
+17. **The benchmark init states are disjoint from the demo init states.** Zero exact matches;
+    every demo initial state sits ~0.98 from its nearest `get_task_init_states()` entry. So
+    the 72% is a genuinely held-out evaluation, not a replay of training initial conditions.
+18. **A 3-episode spot check missed a 2-in-50 failure.** My first replay-fidelity probe was
+    5/5 and I nearly took it as settled. The G1 check now reads the full 50-episode population
+    from the collection run rather than sampling.
+
+### Corrections to SPEC.md
+
+- **§4.1 amended** (Phase 1): the fingerprint also covers the **GL renderer string** and
+  **`obs_source`**, because a `cpu`/`cuda` tag does not separate two machines that both
+  software-rasterise with different mesa drivers. `batch_size` is hashed for the reason in
+  surprise 16.
+- **§4.3 amended** (Phase 1): observations are regenerated by replay rather than read from the
+  HDF5; policy input and the split gripper/delta loss are specified.
+
+### Deviation from SPEC.md §3
+
+Added **`cfe/data/`**, which §3's layout does not list. Demo loading is shared by the policy
+now and the dynamics model in Phase 2, so filing it under `cfe/policy/` would have misplaced
+it. Flagged rather than done silently.
+
+### Gate state
+
+**G0: PASS** (re-verified on this machine). **G1: FAIL (4/6)** — encoder and cache checks all
+pass; the two failures are the expert-replay rate and the BC success rate. Phase 2 is
+**blocked pending a decision on both** (see below).
+
+### Next
+
+1. **Decision needed on the BC success rate.** 72% vs a 40-70% band. Options: accept and
+   record the deviation; deliberately weaken the policy (fewer epochs / smaller head) as an
+   explicit logged decision; or widen the band in SPEC.md. I have not chosen — each of these
+   changes what the failure set looks like in Phase 3/4.
+2. **Decision needed on `demo_27` / `demo_31`.** They are already excluded from training.
+   The open question is whether a 96% `expert_oracle` ceiling is acceptable for SPEC.md §6 or
+   whether the demo set needs auditing across the other tasks too.
+3. Consider `.gitattributes` (`* text=auto eol=lf`) so the CRLF problem does not recur.
+4. Phase 2 per WORKFLOW.md P2, once 1 and 2 are settled.
+
+### Addendum — what the 14 natural failures actually are
+
+Characterised from `results/runs/p1-bc/metrics.jsonl` before deciding anything, because the
+answer changes what decision 1 is worth:
+
+- **All 14 failures are `max_steps` timeouts.** Every one ran the full 300 steps. Not one is a
+  terminal failure (grasped and dropped, knocked the object away, released early). The natural
+  arm of the failure set currently has **exactly one failure mode: the policy stalls.**
+- Successes are bimodal: median 150 steps, but 5 of 36 took >200 and one took 286. The 300-step
+  cap therefore sits close to genuine slow successes.
+- Success rate 0.72, Wilson 95% CI **[0.583, 0.825]**. The lower bound is above 0.70, so this is
+  not a small-sample artefact of the band — the policy is genuinely above it.
+- **Failure supply is not the constraint.** SPEC.md §4.4 needs ~40 natural failures across ≥3
+  tasks (~13/task). At a 28% failure rate that is 50 rollouts/task; at 40% it would be 35.
+  Both are cheap. The band's stated purpose in §4.3 ("one that always fails gives no
+  recoverable ones") is not under threat at 72%.
+
+**A knob that must not be turned.** Because every failure is a timeout, *lowering* `max_steps`
+would move the success rate down into the band without touching the policy. That is tuning the
+measurement to pass a gate — CLAUDE.md rule 3. Recording it here so it is not reached for
+absent-mindedly later. Raising `max_steps` moves the rate up, and is equally off-limits as a
+gate-directed edit.
+
+**The real cost of 72% is diversity, not count.** Whatever is decided about the band, a natural
+failure set that is 100% timeouts gives Phase 3's search a single mode to work on. Injected
+failures (§4.4's four cause tags) carry the diversity; the natural arm may need a second task
+or a lower-capacity policy to produce terminal failures rather than stalls.
+
+---
+
+## 2026-07-31 — Phase 1 decisions resolved
+
+Both open decisions from the previous entry are settled. Diagnostics ran first; the two
+decisions turned out to share one root cause.
+
+### Diagnostic: what the failures actually are
+
+Traced object and gripper positions through 6 of the 14 failed BC rollouts, plus `demo_27`
+and `demo_31`, with two successful controls each.
+
+| | min gripper→object | object → basket | object lift |
+|---|---|---|---|
+| 6 failed rollouts | 0.040 – 0.120 m | 0.509 → 0.509 m (never moves) | +0.043 m |
+| successful rollout | 0.034 m | → 0.019 m | +0.252 m |
+| `demo_27` / `demo_31` | 0.049 / 0.023 m | 0.516 → 0.517, 0.526 → 0.540 m | +0.005 / +0.042 m |
+| successful demos | 0.007 – 0.011 m | → 0.007 – 0.016 m | +0.235 – 0.268 m |
+
+**Every BC failure is an approach failure** — the target is never grasped or transported. The
+`+0.043 m` lift is identical to three decimals across all six failures *including* the one where
+the gripper never came within 12 cm, so it is a reset-settle artefact of the object's own
+geometry, not the robot.
+
+**Corrected 2026-07-31:** an earlier version of this entry said the object is *never touched*.
+That was inferred from distance-to-basket being constant, which is the wrong quantity — an
+object can be brushed sideways without getting closer to the basket. Measured directly, the
+target is displaced 1.3-3.8 cm in 7 of the 14 failures. It is never *transported*: max target
+displacement across all failures is 0.0381 m against a minimum of 0.4843 m across all
+successes, a 13x gap.
+
+**`demo_27` and `demo_31` fail the same way** — the recorded actions replayed in our simulator
+put the gripper 2–5 cm from the object instead of on it. This is the Phase 1 physics drift
+(peaks 4.5–10.6) biting at the one moment with no tolerance: contact. Those two demos had the
+tightest grasp margins; the other 48 had slack.
+
+### Decision 1 — the 72% BC rate: SPEC.md §4.3 and §7 G1 amended
+
+The 40–70% band is replaced by what it was proxying for: **≥13 natural failures per task per
+50 rollouts**, a **reported failure-mode breakdown**, and a wide **[0.20, 0.85]** sanity bound
+on the rate. Full reasoning, the rejected alternatives, and the rule-3 caveat are in the new
+`CHANGELOG.md` — this entry does not restate them.
+
+The decisive evidence was that **weakening the policy would not buy failure diversity**: the
+failure mode is approach imprecision, so a weaker policy produces more of the same mode. The
+option was rejected on measurement, not preference.
+
+Recorded so it is not reached for later: because every failure is a `max_steps` timeout,
+**lowering `max_steps` would slide the rate into the old band without touching the policy.**
+That is measurement-tuning and is off-limits in either direction. Noted in `configs/policy.yaml`
+next to the parameter itself.
+
+### Decision 2 — `demo_27` / `demo_31`: closed
+
+The earlier framing of a "96% `expert_oracle` ceiling" was wrong. §6 defines `expert_oracle`
+per-episode as *"replay the successful demo's actions from the window"*, and §4.4 builds
+injected failures by corrupting **successful** demos. The two bad demos never enter the source
+pool, so `expert_oracle` is ~100% on the injected set by construction. Supply is comfortable:
+48 usable demos/task × 3 tasks = 144 sources against §4.4's ≥40 per cause.
+
+### Open: `expert_oracle` has no referent for natural failures
+
+§6 lists `expert_oracle` as mandatory for every table, but natural failures start from
+benchmark init states, which share **no exact match** with demo init states (verified in
+Phase 1). There is no demo whose actions could serve as the oracle. Logged now, to be resolved
+in Phase 3 when `build_failure_set.py` forces the issue. The likely resolution is that
+`expert_oracle` applies only to the injected arm, and natural-failure tables report the other
+three baselines — but that is a §6 change and is not being made unilaterally.
+
+### Consequence carried into Phase 3
+
+The natural failure set is **100% approach failures**, which nearly duplicates the
+`grasp_offset` injected cause. Failure-set diversity now rests entirely on the injected arm.
+
+### Demo replay yield across tasks (decision 2 follow-up)
+
+Replay-only sweep, no encoding, on two further `libero_object` tasks:
+
+| Task | Name | Demos | Failed | Yield |
+|---|---|---|---|---|
+| 0 | `pick_up_the_alphabet_soup...` | 50 | 2 (`demo_27`, `demo_31`) | **0.96** |
+| 1 | `pick_up_the_cream_cheese...` | 50 | 4 (`demo_8, 28, 29, 40`) | **0.92** |
+| 2 | `pick_up_the_salad_dressing...` | 50 | 3 (`demo_10, 35, 46`) | **0.94** |
+
+Yield is 92–96%, so task 0 was not unusually forgiving and the grasp-margin explanation is a
+general property of replaying these demos in our simulator, not a task-0 quirk. The Phase 4
+source pool across these three tasks is **141 usable demos** against §4.4's ≥40 per injected
+cause. No constraint, and no surprise waiting in Phase 4.
+
+### Correction: the first failure-mode breakdown was wrong
+
+The first run of the new breakdown reported `object_moved_not_placed: 14`, contradicting the
+diagnostic above, which showed the object is never touched. The diagnostic was right and the
+classifier was wrong, for two independent reasons — both found by measurement, not inspection:
+
+1. **`object_positions` matched `<object>_to_robot0_eef_pos` keys.** Those are object-minus-
+   end-effector *relative* positions, so they change whenever the **arm** moves. Every episode
+   in which the robot did anything at all was marked "object disturbed."
+2. **Objects settle under gravity at reset.** Over 120 idle steps with a null action, peak
+   vertical drift is **0.1062 m** and peak horizontal drift is **0.0010 m** — both identical
+   across six init states, so it is deterministic settling, not the robot. A 3-D displacement
+   threshold fires before the arm has moved.
+
+Fixed by excluding relative keys and thresholding on **horizontal** displacement.
+`CONTACT_EPS = 0.01 m` now sits 10× above the measured idle drift and ~50× below the ~0.5 m an
+object travels when actually carried to the basket. Two regression tests pin both facts, and
+the threshold's margins are asserted against the measured numbers rather than hard-coded.
+
+`results/runs/p1-bc2/` carries the bad breakdown and should not be cited; its success rate and
+rollouts are valid. Superseded by `p1-bc3`.
+
+### I5 re-verified
+
+`p1-bc` and `p1-bc2` (same seed, same config, separate processes, one run under CPU contention
+from the yield sweep) produced **identical rollout outcomes across all 50 rollouts** and
+identical losses to 5 decimals (`train 0.12041`, `val 0.36531`).
+
+### Second correction: the breakdown had to separate target from distractors
+
+`p1-bc3` reported `no_object_contact: 3, object_moved_not_placed: 11`. The 11 were the robot
+**nudging a distractor** — this scene holds five distractors plus the basket — while never
+touching the alphabet soup. That collapsed the one distinction the amended §4.3 asks the
+breakdown to make: a missed approach needs a different Phase 3 edit than a grasp-and-drop.
+
+`classify_failure` now tracks the task's target object separately. The target is derived from
+`task.language` ("pick up the alphabet soup..." → `alphabet_soup_1_pos`) rather than
+hard-coded, since §4.4 needs ≥3 tasks, and `find_target_object_key` **raises** if it cannot
+identify exactly one target — a silently wrong target turns the metric into noise, which is
+how the first two versions failed.
+
+`results/runs/p1-bc3/` carries the pre-fix breakdown and is superseded by `p1-bc4`.
+
+### Final Phase 1 failure-mode breakdown (`p1-bc4`)
+
+50 rollouts, seed 0, success rate 0.72 (36/50), 14 failures:
+
+| Mode | n | Target displacement | Other-object displacement |
+|---|---|---|---|
+| `target_moved_not_placed` | 7 | 0.0134 – 0.0381 m | ≤ 0.0118 m |
+| `distractor_only_target_untouched` | 4 | 0.0010 m (idle floor) | 0.0165 – 0.1024 m |
+| `no_object_contact` | 3 | 0.0010 – 0.0036 m | ≤ 0.0016 m |
+
+Successes displace the target 0.4843 – 0.5074 m. **No failure exceeds 0.0381 m**, so the two
+populations are separated by 13× with nothing in between: every failure ends before a grasp is
+achieved, and none is a drop-in-transit. The untouched cases sit exactly at the 0.0010 m idle
+drift floor measured above, which is the intended behaviour of the threshold.
+
+Three attempts were needed to make this metric measure what it claims (relative-position keys,
+reset settle, then distractor conflation). The success rate was bit-identical across all four
+runs; only the breakdown was wrong.
+
+### Gate bug: `fingerprint_mismatch_raises` was not re-runnable
+
+The check deliberately corrupts a fingerprint on disk, and it did so in a fixed directory
+(`<cache_dir>/_g1_probe`) that it never cleaned up. The first G1 run left the tampered
+fingerprint behind, so the *second* invocation crashed on its own leftovers before reaching
+any check — a gate that can only be run once is not a gate. Now runs in a `tempfile.mkdtemp`
+directory removed in a `finally`.
+
+### G1 gate: 5/6 (`g1-20260731T191027Z`, policy run `p1-bc4`)
+
+```
+[PASS] encoder_frozen               0 params require grad
+[PASS] cache_populated              48 episodes, all with metadata
+[PASS] cache_bit_identical          fresh replay+encode == cache, np.array_equal
+[PASS] fingerprint_mismatch_raises  tamper raises; identical fingerprint reopens cleanly
+[FAIL] expert_replay_success        48/50 (demo_27, demo_31), rate 0.96
+[PASS] bc_failure_supply            72.0%, 14 failures >= 13, modes reported
+```
+
+`make lint` clean (21 files). `make test-slow` **41 passed** (32 fast + 9 slow).
+
+**`expert_replay_success` is the one open blocker, and it cannot pass as written.** SPEC.md §8
+requires the success flag to be reproduced *exactly*, over all 50 demos in the HDF5. Measured
+yield is 92–96% across three tasks. This is not a defect in our replay code as far as the
+evidence goes — reset is bit-exact (max diff 0.0), 48/50 reproduce, and the two failures show
+a coherent physical story (gripper 2–5 cm short, tightest grasp margins in the set) — but it
+means the check is permanently red on this data. **Not amended: one spec amendment was already
+made this session, and a second one, on the invariant that protects against replay bugs, is
+not a call to make unilaterally.** Options are in "Next" below.
+
+### G1: PASS (6/6) — Phase 1 complete
+
+`expert_replay_success` resolved by amending SPEC.md §8 to scope the exactness requirement to
+episodes admitted to the cache, with a yield tripwire (`data.min_replay_yield = 0.85`).
+Reasoning in `CHANGELOG.md`. The requirement itself is unchanged: 48/48 cached episodes
+reproduce their success flag exactly, no tolerance.
+
+```
+[PASS] encoder_frozen               0 params require grad
+[PASS] cache_populated              48 episodes, all with metadata
+[PASS] cache_bit_identical          fresh replay+encode == cache, np.array_equal
+[PASS] fingerprint_mismatch_raises  tamper raises; identical fingerprint reopens cleanly
+[PASS] expert_replay_success        48/48 cached exact; yield 0.96 >= 0.85 tripwire
+[PASS] bc_failure_supply            72.0%, 14 failures >= 13, modes reported
+G1: PASS (6/6 checks)
+```
+
+`make test-slow` **41 passed** (32 fast + 9 slow). `make lint` clean (21 files).
+
+Confirms in passing that the `data` block of `configs/encoder.yaml` is not hashed: adding
+`min_replay_yield` left `encoder_cfg_hash` at `a005df8c057942c3` and the 2.8 GB cache opened
+without a fingerprint mismatch.
+
+### Gate state
+
+**G0: PASS. G1: PASS.** Phase 2 is unblocked.
+
+### Next
+
+1. Phase 2 per WORKFLOW.md P2 — latent dynamics model, G2 gate. Note G2's hard stop: if the
+   action-ignoring model is competitive, fix the dynamics model before writing search code.
+2. Carry into Phase 3: the natural failure set is 100% pre-grasp approach failures (7 target
+   brushed, 4 distractor-only, 3 no contact), which nearly duplicates the `grasp_offset`
+   injected cause. Diversity rests on the injected arm.
+3. Open §6 question, deliberately deferred: `expert_oracle` has no referent for natural
+   failures, whose init states share no exact match with any demo init state. Resolve when
+   `build_failure_set.py` forces it.
+4. Nothing in this session is committed.

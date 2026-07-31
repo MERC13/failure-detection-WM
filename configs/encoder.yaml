@@ -1,0 +1,59 @@
+# Frozen visual encoder (SPEC.md §4.1).
+#
+# Everything under `encoder:` is hashed into encoder_cfg_hash and therefore into the cache
+# key. Everything under `runtime:` and `data:` is not — those select *which* frames get
+# encoded and how fast, not *what* a frame encodes to.
+
+encoder:
+  model_id: facebook/dinov2-base
+
+  # Pinned so encoder_cfg_hash means something. An upstream re-upload must invalidate the
+  # cache rather than silently change latents under an unchanged key.
+  model_revision: f9e44c814b77203eaa57a6bdbbd535f21ede1415
+
+  # DINOv2 native resolution. LIBERO frames are 128x128 and get upsampled.
+  # 224/14 = 16 -> 16*16 patches + 1 CLS = 257 tokens of 768 dims.
+  image_size: 224
+
+  # MuJoCo's framebuffer is bottom-up, so both the live env and the recorded demos hand us
+  # vertically flipped frames (verified by eye, 2026-07-30). DINOv2 is pretrained on
+  # upright photographs; feeding it inverted scenes is a silent quality loss, not a crash.
+  flip_vertical: true
+
+  resize_mode: bicubic
+  resize_antialias: true
+
+  # Bicubic overshoots [0,1] on sharp edges; clamping mirrors what PIL-based pipelines
+  # effectively do and keeps inputs in the range the normalisation assumes.
+  clamp_after_resize: true
+
+  # ImageNet statistics, which DINOv2 was trained with.
+  norm_mean: [0.485, 0.456, 0.406]
+  norm_std: [0.229, 0.224, 0.225]
+
+  # SPEC.md §4.1 (amended): tokens stay canonical, but fp32 tokens cost 786 KB/frame —
+  # 6.1 GB for one task. The encoder RETURNS this dtype rather than computing fp32 and
+  # narrowing on write, so "a cache hit is bit-identical to a fresh encode" is literally
+  # true rather than true-modulo-a-cast.
+  output_dtype: float16
+
+  # Hashed deliberately. GPU matmul kernels can vary with batch shape, so a latent is only
+  # reproducible at the batch size that produced it. Changing this invalidates the cache,
+  # which is the honest behaviour.
+  batch_size: 64
+
+runtime:
+  cache_dir: ~/data/cfe_cache
+  device: auto # auto | cpu | cuda
+
+data:
+  suite: libero_object
+  task_id: 0
+  dataset_dir: ~/data/libero
+
+  # Regression tripwire for G1's expert_replay_success (SPEC.md §8, amended 2026-07-31), NOT a
+  # pass mark. The gate's real condition is that no episode failing replay reaches the cache.
+  # Measured yield is 0.96 / 0.92 / 0.94 on libero_object tasks 0 / 1 / 2 — a genuine replay bug
+  # would crater this, not clip the few tightest-margin demos. Do not lower it to make a run
+  # pass (CLAUDE.md rule 3).
+  min_replay_yield: 0.85

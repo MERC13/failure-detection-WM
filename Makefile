@@ -7,10 +7,16 @@ PY   := $(VENV)/bin/python
 # WSLg's libd3d12 + mesa d3d12_dri; osmesa is the software fallback.
 export MUJOCO_GL ?= egl
 
-.PHONY: env-check test test-slow lint
+.PHONY: env-check g1-check test test-slow lint
 
 env-check:
 	$(PY) scripts/verify_env.py --config configs/env.yaml
+
+# POLICY_RUN is the train_policy.py run_id whose measured success rate the gate reads;
+# COLLECT_RUN is the collect_demos.py run_id whose full-population replay result it reads.
+g1-check:
+	$(PY) scripts/verify_g1.py --config configs/encoder.yaml \
+		--policy-run $(POLICY_RUN) --collect-run $(COLLECT_RUN)
 
 test:
 	$(PY) -m pytest tests/ -v -m "not slow"

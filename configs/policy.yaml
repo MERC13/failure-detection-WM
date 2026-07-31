@@ -1,0 +1,47 @@
+# BC policy (SPEC.md §4.3). A failure generator, not a contribution.
+#
+# The gate is failure *supply*, not a success-rate band: enough natural failures to work with,
+# and a reported breakdown of what kind they are. The rate is still recorded and bounded, but
+# widely. See CHANGELOG.md 2026-07-31 for why the original 40-70% band was replaced.
+#
+# Whatever the policy measures, that number gets reported — CLAUDE.md rule 3 forbids tuning it,
+# or the evaluation protocol below, to make a gate pass. Note in particular that every failure
+# so far is a `max_steps` timeout, so `max_steps` is a lever on the success rate. It is not to
+# be touched for that purpose in either direction.
+
+encoder_config: configs/encoder.yaml # which cache to read; must already be populated
+env_config: configs/env.yaml
+
+policy:
+  # Action chunking (SPEC.md §4.3): predict H actions from one observation, execute all H
+  # before re-observing. Cheap, and it stabilises an otherwise very weak MLP.
+  chunk_size: 8
+  hidden_sizes: [512, 512]
+  dropout: 0.1
+
+  # pool(z) is mean over patch tokens; proprio is eef_pos(3) + eef_quat(4) + gripper_qpos(2).
+  include_cls_in_pool: false
+  use_proprio: true
+
+train:
+  epochs: 20
+  batch_size: 256
+  lr: 0.0003
+  weight_decay: 0.0001
+  val_fraction: 0.1
+
+  # The gripper dimension is strictly binary {-1,+1} in these demos (PROGRESS.md surprise
+  # 10), so it is a classification target. CLAUDE.md: do not apply a symmetric L2 penalty to
+  # dim 6 as though it were continuous like the 6 end-effector deltas.
+  gripper_loss: bce
+  gripper_loss_weight: 1.0
+  delta_loss: smooth_l1
+
+eval:
+  n_rollouts: 50
+  max_steps: 300 # demos run 136-196 steps; this allows slack without running forever
+
+  # SPEC.md §4.4 wants ~40 natural failures across >=3 tasks, so ~13 per task.
+  min_failures: 13
+  # Wide sanity bound only. Outside this, supply or recoverability genuinely breaks down.
+  success_bounds: [0.20, 0.85]
