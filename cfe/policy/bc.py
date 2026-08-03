@@ -292,16 +292,29 @@ def rollout(
     max_steps: int,
     device: torch.device,
     target_key: str,
+    capture: bool = False,
 ) -> dict:
     """Run the policy closed-loop from an exact init state. Success comes from the simulator.
 
     Observations are encoded one frame at a time, whereas the training cache was built at
     `encoder.cfg.batch_size`. Encoding is not batch-invariant, but the discrepancy is ~1 fp16
     ULP (max 7.8e-3 against a token std of 1.78), far below anything a policy responds to.
+
+    `capture=True` additionally returns `frames`, `proprio` and `actions`, matching
+    `replay_episode`'s `T+1`-observations-for-`T`-actions contract so a rollout episode and a
+    demo episode are the same shape of thing in the cache. The captured frames are *not* the
+    per-step encodings computed above: callers re-encode them in batches of
+    `encoder.cfg.batch_size`, which is what the cached demo latents were produced at and what
+    the cache fingerprint hashes. Encoding them any other way would put two subtly different
+    kinds of latent under one key.
     """
     env.reset()
     obs = env.set_init_state(init_state)
     policy.eval()
+
+    frames = [obs[CAMERA_KEY].copy()] if capture else None
+    proprio = [proprio_vector(obs)] if capture else None
+    executed: list[np.ndarray] = []
 
     start_pos = object_positions(obs)
     if target_key not in start_pos:
@@ -321,7 +334,7 @@ def rollout(
     def result(steps: int) -> dict:
         success = bool(env.check_success())
         timed_out = steps >= max_steps
-        return {
+        out = {
             "success": success,
             "steps": steps,
             "timed_out": timed_out,
@@ -331,6 +344,13 @@ def rollout(
                 None if success else classify_failure(target_disp, other_disp, timed_out)
             ),
         }
+        if capture:
+            out |= {
+                "frames": np.asarray(frames, dtype=np.uint8),
+                "proprio": np.asarray(proprio, dtype=np.float32),
+                "actions": np.asarray(executed, dtype=np.float32),
+            }
+        return out
 
     steps = 0
     with torch.inference_mode():
@@ -348,6 +368,10 @@ def rollout(
                 obs, _reward, done, _info = env.step(action)
                 steps += 1
                 note_displacement(obs)
+                if capture:
+                    executed.append(np.asarray(action, dtype=np.float32).copy())
+                    frames.append(obs[CAMERA_KEY].copy())
+                    proprio.append(proprio_vector(obs))
                 if done or env.check_success():
                     return result(steps)
     return result(steps)

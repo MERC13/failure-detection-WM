@@ -48,6 +48,7 @@ def main() -> int:
     os.environ.setdefault("MUJOCO_GL", env_cfg["render_backend"])
 
     from cfe.data.demos import (
+        cache_episode_id,
         demo_file_path,
         episode_ids,
         gl_renderer,
@@ -91,8 +92,10 @@ def main() -> int:
     n_frames = 0
     try:
         for i, eid in enumerate(ids):
-            if cache.has(eid) and cache.has_meta(eid) and not args.force:
-                skipped.append(eid)
+            # `eid` indexes the HDF5; `cid` names the entry in the flat, task-shared cache.
+            cid = cache_episode_id(data_cfg["suite"], data_cfg["task_id"], eid)
+            if cache.has(cid) and cache.has_meta(cid) and not args.force:
+                skipped.append(cid)
                 continue
             ep = read_episode(path, eid)
             t0 = time.time()
@@ -101,7 +104,7 @@ def main() -> int:
 
             if not out["success"]:
                 # Reported, not cached, and not tuned away.
-                failed.append(eid)
+                failed.append(cid)
                 print(
                     f"[{i + 1:3d}/{len(ids)}] {eid}: REPLAY FAILED "
                     f"(reward_sum={out['reward_sum']:.1f}) — not cached"
@@ -112,9 +115,9 @@ def main() -> int:
             tokens = encoder.encode(out["frames"])
             t_encode = time.time() - t0
 
-            cache.write(eid, tokens)
+            cache.write(cid, tokens)
             cache.write_meta(
-                eid,
+                cid,
                 actions=out["actions"],
                 proprio=out["proprio"],
                 success=np.array(out["success"]),
@@ -123,7 +126,8 @@ def main() -> int:
             n_frames += len(out["frames"])
             records.append(
                 {
-                    "episode_id": eid,
+                    "episode_id": cid,
+                    "demo_id": eid,
                     "n_frames": int(len(out["frames"])),
                     "n_actions": int(len(out["actions"])),
                     "success": True,

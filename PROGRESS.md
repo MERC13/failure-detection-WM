@@ -603,3 +603,224 @@ without a fingerprint mismatch.
    failures, whose init states share no exact match with any demo init state. Resolve when
    `build_failure_set.py` forces it.
 4. Nothing in this session is committed.
+
+## 2026-08-01 — Phase 2 Part A: latent dynamics, G2 **FAIL**
+
+Scope was Part A only (WORKFLOW P2). `cfe/eval/` was deliberately not written this session.
+
+### What landed
+
+- Episode IDs namespaced to `libero_object_t0_<id>` (96 cache files renamed, no re-encoding).
+  G1 re-verified **PASS 6/6** after the rename before anything was built on top.
+- `scripts/collect_rollouts.py` — 50 BC rollouts (34 success / 13 failure / 3 already cached),
+  9520 frames at 6.71 frames/s, **zero determinism mismatches vs `p1-bc4`**. Failures are
+  cached here on purpose; they were correctly excluded as BC *targets* but are training data
+  for dynamics, and they double as Phase 3's natural failure set.
+- `cfe/dynamics/{latents,model,data}.py`, `configs/dynamics.yaml`, `scripts/probe_representation.py`,
+  `scripts/train_dynamics.py`, `scripts/verify_g2.py`, `tests/test_dynamics.py`.
+- `make lint` clean (32 files). `make test` **74 passed** (32 existing + 42 new).
+
+### Representation probe (`p2-probe`) — run before any model existed
+
+Distance from each rollout's terminal latent to the goal set, against the simulator success
+flag. Deliberately measured before a model could bias the choice of reduction.
+
+| reduction | R | rho (raw) | rho (layernorm) |
+|---|---|---|---|
+| cls | 1 | -0.7315 | -0.7285 |
+| mean | 1 | -0.7315 | -0.7408 |
+| grid2 | 5 | -0.7439 | -0.7562 |
+| **grid4** | **17** | **-0.7778** | **-0.7778** |
+| full | 257 | -0.7778 | -0.7778 |
+
+All ten clear the pre-registered `|rho| >= 0.30` with the correct sign. `grid4` ties `full`
+exactly at 1/15 the tokens, so `grid4` was chosen. Mean distance success 23.83 vs failure
+49.04 (grid4/layernorm).
+
+### SPEC.md §5 reading, recorded here as a clarification
+
+§5 wants "a successful demo for the same task *and initial state*". Phase 1 established that no
+demo init state matches any benchmark init state, so that is unimplementable for the natural
+arm. Used §5's own fallback: **`z_goal` = minimum L2 over the 48 successful demo terminal
+latents**. Same root cause as the still-open `expert_oracle` gap in §6.
+
+### SPEC.md §4.2 reading, recorded here as a clarification
+
+"teacher-forced one-step loss plus a short autoregressive rollout loss (2 steps)" is read as
+***chunk*-level**: chunk 1 teacher-forced, chunk 2 conditioned on the model's own output
+(`ar_chunks=2`). The single-frame reading trains nothing about compounding error across a
+chunk, which is the regime §5's search actually runs in. Chunks weighted equally.
+
+### G2: **FAIL (3/5)** — `g2-20260801T014804Z`, dyn run `p2-dyn`
+
+15 held-out episodes, 2542 gated windows. Criteria were pre-registered in `configs/dynamics.yaml`
+before any number existed.
+
+```
+[FAIL] beats_copy_last_latent   h1 0.1058 vs 0.0793 (-33.4%);  h2 0.1058 vs 0.0976 (-8.3%)
+                                h4 0.1063 vs 0.1200 (+11.4%);  h8 0.1095 vs 0.1546 (+29.2%)
+[FAIL] beats_action_ignoring    h8 rel_improvement 0.0499 vs pre-registered 0.20
+                                CI excludes zero at ALL horizons (h8 [0.005375, 0.006158], n=2542)
+                                ci_criterion_met=true, rel_criterion_met=false
+[PASS] goal_distance_correlates grid4/layernorm rho=-0.7778
+[PASS] eval_deterministic       bit-exact per-window errors
+[PASS] config_snapshot_present
+```
+
+Non-gated: h16 +9.2%, h32 +14.2%, h64 +20.3% vs the twin. Training: dynamics val 0.011649,
+twin val 0.013349; 2546 s / 2719 s; 7,773,312 params; 13,361 train / 2,422 val windows.
+
+**The result is reported as-is. Neither the threshold nor the model was adjusted.** Action
+conditioning helps *reliably* (CI excludes zero everywhere, and the margin grows monotonically
+with horizon) but *weakly* — 5% at h8 against a pre-registered 20%.
+
+### Why it failed — diagnosis, incomplete
+
+The FAIL only means "action-conditioning does not help enough" if the model is sound. It is not.
+
+- **Not a wiring bug.** Predictions differentiate across the horizon (pred std 0.0373 vs target
+  0.0972; pred[h1] vs pred[h8] 0.0941 vs target 0.1604) — under-predicts change, but the query
+  tokens are doing distinct work.
+- **Not output collapse.** Pred overall std 1.0025 vs target 1.0000.
+- **The model cannot overfit 64 windows.** 600 steps on a fixed batch: 0.5476 -> 0.0479 ->
+  0.0257 -> 0.0202 -> 0.0168, final `mean|err|` **0.1173** against copy-last **0.1261** on the
+  very batch it is memorising. Full-run val loss was 0.0116. **This is an architectural floor,
+  not a data or epoch limit** — so G2's failure does *not* establish that action-conditioning
+  is useless.
+
+Two structural causes were proposed:
+
+- **H1 — `d_model=384 < latent_dim=768` is a rank bottleneck. REFUTED.** Tested as linear
+  algebra rather than by training: the best rank-r reconstruction of the targets (SVD,
+  Eckart-Young) is a lower bound on any rank-r linear head. rank 64 -> 0.0808, rank 128 ->
+  0.0566, rank 256 -> 0.0354, **rank 384 -> 0.0236**, capturing 99.79% of target variance. A
+  384-wide head can represent the targets 5x better than the observed 0.117 floor. The head
+  is not the constraint.
+- **H2 — no residual path from the last context frame**, so the model must synthesise the whole
+  latent instead of a delta off `z[t]`. **Supported, with a caveat that matters more than the
+  result.** Tested at reduced scale on CPU (d=128, L=2, 622K params) because the box was
+  crashing; both arms identical in config, seed, and batch, differing only in the residual path.
+
+  | | mean\|err\| | vs copy-last |
+  |---|---|---|
+  | copy-last | 0.126149 | — |
+  | small as-shipped | 0.151249 | -19.9% |
+  | **small RESIDUAL** | **0.117384** | **+6.9%** |
+  | full-scale as-shipped (7.77M) | 0.117304 | +7.0% |
+
+  The residual path is worth **+22.4%** at matched scale, and a 622K residual model reaches
+  what the 7.77M shipped model reaches — 12x fewer parameters, same number.
+
+  That equivalence — 0.117384 vs 0.117304 across a 12x parameter gap — looked suspicious, and
+  chasing it produced the most important correction of the session.
+
+### Correction: "the model cannot overfit 64 windows" was a step-budget artifact
+
+The 600-step overfit test was the basis for calling the floor architectural. It does not survive.
+Running the residual arm 4x longer (2400 steps, CPU):
+
+```
+copy-last                    0.126149
+full-scale as-shipped (600)  0.117304
+small residual (600 steps)   0.117384
+small residual (2400 steps)  0.088903      +24.3%,  loss 0.008476 and still descending
+```
+
+**~0.117 is neither an information floor nor an architecture floor — it is simply where this
+setup lands after 600 steps.** The overfit test was undertrained, so the inference built on it
+("architectural floor, therefore G2's FAIL establishes nothing") was wrong.
+
+### And the full run, unlike the overfit batch, *was* converged
+
+Checked independently from `p2-dyn/metrics.jsonl` rather than re-deriving it:
+
+```
+dynamics        val, last 5 epochs: 0.012029 0.011862 0.011901 0.011619 0.011649  (delta -0.00038)
+                train 0.011316 -> 0.010582                      (train-val gap opening)
+action_ignoring val, last 5 epochs: 0.013458 0.013108 0.013116 0.013220 0.013349  (rising)
+```
+
+The twin is past its best at ~epoch 26 and overfitting. So the undertraining found on a fixed
+64-window batch **does not transfer to the full run**, and more epochs will not rescue G2.
+
+**Revised reading: G2's FAIL is probably real.** Action-conditioning helps reliably — the paired
+CI excludes zero at every horizon and the margin grows monotonically to +20.3% at h64 — but
+weakly, ~5% at h8 against a pre-registered 20%. On the current evidence that is a true property
+of this model on this data, not a defect introduced in the implementation.
+
+### H2 confirmed against its matched control
+
+Running both arms to 2400 steps, identical in everything but the residual path:
+
+| | 600 steps | 2400 steps |
+|---|---|---|
+| as-shipped | 0.151249 | 0.103996 |
+| **residual** | **0.117384** | **0.088903** |
+| residual advantage | +22.4% | **+14.5%** |
+
+The advantage survives 4x the budget, so it is not merely faster convergence. It does narrow
+(22.4% -> 14.5%), so part of it is optimisation speed. Both arms still descending at 2400.
+
+### Why residual may nevertheless move G2, for a reason worth stating in advance
+
+Both gate failures have a common cause: **the model spends most of its capacity reconstructing
+`z[t]`**, which is the bulk of `z[t+1]`.
+
+- `beats_copy_last_latent` fails hardest at h1 (-33.4%), exactly where copy-last is strongest.
+  A residual model *starts* at copy-last by construction, so this check should flip.
+- `beats_action_ignoring` compares two models that both carry that same large shared
+  reconstruction term. It is common to both and dilutes the relative gap. Removing it means the
+  measured ratio is taken over the *delta* — which is precisely where action information lives.
+  Absolute gap at h8 is 0.1153 - 0.1095 = 0.0058; if residual cuts both errors substantially
+  while preserving that gap, `rel_improvement` rises toward the pre-registered 0.20.
+
+**This is a prediction, not a result, and it is recorded here before the run so it cannot be
+retrofitted.** It could also fail: residual helps the twin too, and if it helps the twin more,
+the gap shrinks and G2 fails harder. Either outcome is informative; neither changes the gate.
+
+### What surprised me
+
+- The gate's two failures point in opposite directions and both matter. `beats_copy_last_latent`
+  fails at *short* horizons (h1 -33%) because copy-last is extremely strong when latents barely
+  move; `beats_action_ignoring` fails at *long* horizons only in magnitude, never in sign.
+  A model that beat copy-last at h1 would likely clear both.
+- `grid4` matching `full` to four decimals on rho was not expected, and it saved 15x on tokens.
+
+### Hardware: four unexpected shutdowns, and why it is not OOM
+
+The box hard-rebooted four times today (13:55, 14:11, 14:13, 14:59) while running GPU work.
+**Windows Kernel-Power Event 41 each time, no bugcheck code, no BSOD since May 7**, paired with
+Event 125. Linux logged no OOM kills and system RAM peaked well under the 7.7 GB WSL allocation.
+A CUDA OOM raises a Python exception; it does not reboot the host.
+
+`nvidia-smi -q -d POWER` reports **Current Power Limit 105.65 W against a Default of 100 W** on
+an RTX 4070 Laptop. This is a power-delivery trip under sustained 100% GPU, and it is a hard
+constraint on this box for the rest of the project — Phase 3's search budget must assume it.
+
+Mitigation is `nvidia-smi -pl 85` from an **elevated Windows** shell; WSL cannot set clocks
+("current user does not have permission"). Resets on reboot.
+
+Note for future diagnostics: H1 was the variant driving VRAM to 7.7/8.2 GB, and refuting it
+analytically on CPU cost seconds and zero crash risk. Prefer that ordering.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: FAIL (3/5).**
+
+Per WORKFLOW P2's hard stop, no counterfactual search code is written until G2 passes.
+
+### Next
+
+1. **Decision for the user, not for me: add the residual connection and retrain.** It is a
+   one-line change to `LatentDynamics.forward`, but it is an architecture change to a gated
+   model, so it is logged and decided rather than slipped in. Cost is ~87 min of sustained GPU
+   for model + twin, plus the G2 re-run.
+2. **Cap GPU power before that run** (`nvidia-smi -pl 85`, elevated Windows shell). Today's
+   trips came from runs of 150 s and up; losing an 87-minute run to a reboot costs the run and
+   the uptime.
+3. If residual does not move `beats_action_ignoring`, the next candidates in order:
+   proprioception (§4.2 specifies latents + actions only; this would be a documented deviation),
+   a shorter horizon, a finer reduction than `grid4`, and a larger `k_context`.
+4. `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
+3. `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
+4. Nothing from Phase 2 is committed.

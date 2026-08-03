@@ -7,7 +7,7 @@ PY   := $(VENV)/bin/python
 # WSLg's libd3d12 + mesa d3d12_dri; osmesa is the software fallback.
 export MUJOCO_GL ?= egl
 
-.PHONY: env-check g1-check test test-slow lint
+.PHONY: env-check g1-check g2-check test test-slow lint
 
 env-check:
 	$(PY) scripts/verify_env.py --config configs/env.yaml
@@ -17,6 +17,12 @@ env-check:
 g1-check:
 	$(PY) scripts/verify_g1.py --config configs/encoder.yaml \
 		--policy-run $(POLICY_RUN) --collect-run $(COLLECT_RUN)
+
+# DYN_RUN is the train_dynamics.py run_id holding dynamics.pt; PROBE_RUN is the
+# probe_representation.py run_id supplying SPEC.md §4.2's goal-distance Spearman rho.
+g2-check:
+	$(PY) scripts/verify_g2.py --config configs/dynamics.yaml \
+		--dyn-run $(DYN_RUN) --probe-run $(PROBE_RUN)
 
 test:
 	$(PY) -m pytest tests/ -v -m "not slow"

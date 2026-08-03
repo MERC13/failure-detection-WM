@@ -79,16 +79,20 @@ def check_cache_populated(cache, expected_hash: str) -> Result:
     )
 
 
-def check_cache_bit_identical(cache, encoder, env, path, episode_id: str) -> Result:
+def check_cache_bit_identical(cache, encoder, env, path, demo_id: str, episode_id: str) -> Result:
     """SPEC.md §8: a cache hit must be bit-identical to a fresh encode.
 
     Re-replays the episode and re-encodes it rather than comparing the cache against itself,
     so this also exercises replay determinism — a cache built from a non-reproducible replay
     would be just as poisonous as one built from a different encoder.
+
+    `demo_id` indexes the HDF5 (`demo_0`); `episode_id` names the cache entry
+    (`libero_object_t0_demo_0`). They stopped being the same string when the cache gained a
+    task namespace, and passing one where the other is wanted is a KeyError, not a wrong number.
     """
     from cfe.data.demos import read_episode, replay_episode
 
-    ep = read_episode(path, episode_id)
+    ep = read_episode(path, demo_id)
     out = replay_episode(env, ep["actions"], ep["states"][0])
     fresh = encoder.encode(out["frames"])
     cached = np.asarray(cache.read(episode_id))
@@ -309,7 +313,13 @@ def main() -> int:
 
     os.environ.setdefault("MUJOCO_GL", env_cfg["render_backend"])
 
-    from cfe.data.demos import demo_file_path, episode_ids, gl_renderer, make_replay_env
+    from cfe.data.demos import (
+        cache_episode_id,
+        demo_file_path,
+        episode_ids,
+        gl_renderer,
+        make_replay_env,
+    )
     from cfe.encoders import Dinov2Encoder, EncoderConfig
     from cfe.encoders.cache import EncodingCache, Fingerprint
 
@@ -341,9 +351,14 @@ def main() -> int:
 
         results.append(check_cache_populated(cache, cache.hash))
         ids = episode_ids(path)[: max(1, args.n_replay_checks)]
-        cached_ids = cache.episode_ids()
-        if cached_ids:
-            results.append(check_cache_bit_identical(cache, encoder, env, path, cached_ids[0]))
+        # Pick the first *demo* that is actually cached, rather than the first cache entry:
+        # the cache is shared with policy rollouts, which have no HDF5 to re-replay from.
+        cid_of = {d: cache_episode_id(data_cfg["suite"], data_cfg["task_id"], d) for d in ids}
+        probe = next((d for d in ids if cache.has(cid_of[d])), None)
+        if probe is not None:
+            results.append(
+                check_cache_bit_identical(cache, encoder, env, path, probe, cid_of[probe])
+            )
         results.append(
             check_fingerprint_mismatch_raises(
                 enc_cfg, Path(os.path.expanduser(runtime_cfg["cache_dir"])) / "_g1_probe"

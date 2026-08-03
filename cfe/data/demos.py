@@ -92,6 +92,19 @@ def episode_ids(path: str | Path) -> list[str]:
         return sorted(f["data"].keys(), key=lambda k: int(k.split("_")[1]))
 
 
+def cache_episode_id(suite: str, task_id: int, episode_id: str) -> str:
+    """Namespace an episode for the cache, which is flat and shared across tasks.
+
+    The HDF5 calls its first demo `demo_0` in *every* task, so caching under the bare name
+    means task 1's `demo_0` silently overwrites task 0's. SPEC.md §4.4 needs ≥3 tasks, so the
+    collision is a matter of when, not if. Renaming later means migrating tens of GB; the
+    prefix costs nothing now.
+
+    Rollout episodes use the same namespace with a `rollout_<init_idx>` local id.
+    """
+    return f"{suite}_t{int(task_id)}_{episode_id}"
+
+
 def read_episode(path: str | Path, episode_id: str) -> dict:
     """Recorded `actions (T,7)` and `states (T,110)`.
 

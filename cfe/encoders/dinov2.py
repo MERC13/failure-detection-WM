@@ -175,3 +175,50 @@ def pool(tokens: np.ndarray | torch.Tensor, include_cls: bool = False):
     if isinstance(sliced, torch.Tensor):
         return sliced.mean(dim=-2)
     return sliced.mean(axis=-2)
+
+
+#: Reductions the dynamics model may operate on, cheapest first. Which one to use is decided
+#: by measurement (`scripts/probe_representation.py`), not by preference: full patch tokens are
+#: 257x768 per frame, and a k=4 context with an H=8 horizon does not fit comfortably in 8.59 GB.
+REDUCTIONS = ("cls", "mean", "grid2", "grid4", "full")
+
+
+def grid_pool(tokens: np.ndarray, grid: int) -> np.ndarray:
+    """Average the 16x16 DINOv2 patch grid down to `grid` x `grid`, keeping CLS as token 0.
+
+    `(..., 257, D) -> (..., grid*grid + 1, D)`. Mean-pooling all 256 patches throws away
+    *where* things are, which is most of what distinguishes "object on the table" from "object
+    in the basket" — the thing this project is trying to measure. A coarse grid keeps location
+    at a fraction of the cost.
+    """
+    *lead, n, d = tokens.shape
+    side = int(round((n - 1) ** 0.5))
+    if side * side != n - 1:
+        raise ValueError(f"expected 1 CLS + a square patch grid, got {n} tokens")
+    if side % grid:
+        raise ValueError(f"{side}x{side} patch grid is not divisible into {grid}x{grid}")
+    block = side // grid
+    cls = tokens[..., :1, :]
+    patches = tokens[..., 1:, :].reshape(*lead, grid, block, grid, block, d)
+    pooled = patches.mean(axis=(-4, -2)).reshape(*lead, grid * grid, d)
+    return np.concatenate([cls, pooled], axis=-2)
+
+
+def reduce_latents(tokens: np.ndarray, mode: str) -> np.ndarray:
+    """Apply one of `REDUCTIONS` to `(..., N, D)` tokens, returning `(..., R, D)`.
+
+    Always returns a token axis, even when `R == 1`, so downstream code has one shape to
+    reason about. Kept beside `pool()` and called at the point of use for the same reason:
+    CLAUDE.md asks that the choice stay visible rather than buried in the encoder.
+    """
+    # Checked against the whitelist first: the mode comes from a config file, and a typo
+    # should say so plainly rather than fail somewhere inside a parse.
+    if mode not in REDUCTIONS:
+        raise ValueError(f"unknown reduction {mode!r}; expected one of {REDUCTIONS}")
+    if mode == "full":
+        return tokens
+    if mode == "cls":
+        return tokens[..., :1, :]
+    if mode == "mean":
+        return pool(tokens, include_cls=False)[..., None, :]
+    return grid_pool(tokens, int(mode.removeprefix("grid")))

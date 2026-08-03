@@ -1,0 +1,68 @@
+# Action-conditioned latent dynamics (SPEC.md §4.2).
+#
+# G2's central question is whether this model beats an identical one trained with actions
+# zeroed. The pass criteria in `gate:` below were fixed BEFORE any number existed, which is the
+# whole point of writing them down — relaxing a threshold after seeing the result is what
+# CLAUDE.md rule 3 forbids, and "it was only a little short" is how that happens.
+
+encoder_config: configs/encoder.yaml # which cache to read; must already be populated
+env_config: configs/env.yaml
+
+dynamics:
+  # SPEC.md §4.2: "k = 4, H = 8 to start. Both configurable."
+  k_context: 4
+  horizon: 8
+
+  # Which reduction of the 257x768 patch tokens the model works on. Chosen by measurement
+  # (scripts/probe_representation.py), not preference: `full` is ~13 GB of latents for this
+  # dataset and does not fit, and `mean` throws away *where* the object is, which is most of
+  # what separates success from failure here. See PROGRESS.md for the measured rho per option.
+  reduction: grid4
+
+  d_model: 384
+  n_layers: 4
+  n_heads: 6
+  dropout: 0.1
+  ffn_mult: 4
+  latent_dim: 768 # DINOv2-base token width
+
+  # Predict `z[t+1..t+H]` as a delta off `z[t]` instead of synthesising the whole latent.
+  # Added after the first G2 run FAILED, on measurement rather than intuition: at matched scale
+  # and matched step budget, residual is worth +22.4% at 600 steps and +14.5% at 2400, so the
+  # advantage survives 4x the budget and is not merely faster convergence.
+  #
+  # This is an architecture change, NOT a gate change. Nothing in `gate:` below moved, and the
+  # first run's FAIL stands on the record either way. Full reasoning and the falsifiable
+  # prediction made before this run are in PROGRESS.md 2026-08-01.
+  residual: true
+
+train:
+  epochs: 30
+  batch_size: 128
+  lr: 0.0003
+  weight_decay: 0.0001
+  val_fraction: 0.15 # held out by EPISODE; windows overlap heavily, so a window split leaks
+  grad_clip: 1.0
+
+  # SPEC.md §4.2: "teacher-forced one-step loss plus a short autoregressive rollout loss
+  # (2 steps)". Read as chunk-level: chunk 1 from real context, chunk 2 from the model's own
+  # predictions. See cfe/dynamics/model.py:rollout_loss for why.
+  ar_chunks: 2
+  loss: smooth_l1
+
+eval:
+  # Gated horizons, per SPEC.md §4.2.
+  horizons: [1, 2, 4, 8]
+
+  # NOT gated. SPEC.md §5 rolls the model forward from the edit window to the end of the
+  # episode, which is far past horizon 8, and nothing in G2 as specified would reveal that the
+  # error has exploded by then. Reported so Phase 3 is not a surprise.
+  diagnostic_horizons: [16, 32, 64]
+
+  n_bootstrap: 10000
+
+gate:
+  # Pre-registered 2026-07-31, before the model was trained. See CHANGELOG.md if these change.
+  min_rel_improvement_h8: 0.20 # vs the action-ignoring twin, at horizon 8
+  ci_horizons: [4, 8] # paired bootstrap CI must exclude zero at both
+  min_abs_spearman: 0.30 # goal-latent distance vs task success
