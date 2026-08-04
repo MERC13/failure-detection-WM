@@ -824,3 +824,120 @@ Per WORKFLOW P2's hard stop, no counterfactual search code is written until G2 p
 4. `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
 3. `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
 4. Nothing from Phase 2 is committed.
+
+## 2026-08-03 — Phase 2 Part A: residual retrain, G2 **FAIL** again (4/5)
+
+### What landed
+
+- Phase 2 Part A committed: `b5861f2` on branch `phase2-dynamics` (branched off `main` first).
+  Lint clean, 78 fast tests green. Nothing from `results/` leaked past the ignore rules.
+- `p2-dyn-res` trained: residual model 2899 s, action-ignoring twin 2919 s, 5849 s total.
+- G2 re-run `g2-20260804T000955Z`: **FAIL, 4/5.** `beats_action_ignoring` is the sole failure.
+
+### Both halves of the pre-registered prediction came true at once
+
+The prediction recorded at PROGRESS.md:764-779 *before* this run said residual should flip
+`beats_copy_last_latent`, and warned it "could also fail: residual helps the twin too, and if it
+helps the twin more, the gap shrinks and G2 fails harder." **Both happened.**
+
+```
+                        p2-dyn (first run)      p2-dyn-res (this run)
+beats_copy_last_latent  FAIL                    PASS
+  h1                    -33.4%                  +2.07%   (0.077650 vs 0.079292)
+  h2                     -8.3%                  +7.56%   (0.090253 vs 0.097631)
+  h4                    +11.4%                 +16.98%   (0.099599 vs 0.119971)
+  h8                    +29.2%                 +29.47%   (0.109058 vs 0.154620)
+
+beats_action_ignoring   FAIL                    FAIL (worse)
+  h8 rel_improvement    0.0499                  0.0350   vs pre-registered 0.20
+  CI excludes zero      all horizons            h2/h4/h8 (not h1); criterion met
+extended, not gated
+  h16 / h32 / h64       +9.2 / +14.2 / +20.3%   +6.3 / +11.6 / +17.3%
+```
+
+The prediction's arithmetic is where it broke. It required residual to "cut both errors
+substantially **while preserving that gap**." Errors fell as expected, but the absolute h8 gap
+went **0.0058 → 0.003955, a 32% shrink**, so the ratio fell instead of rising. The model got
+better at every horizon and simultaneously less action-dependent.
+
+Mechanism, consistent with the numbers: initialising at copy-last-latent makes it easier to
+score well *without using actions*, so the twin banks most of the gain. Residual bought absolute
+accuracy and paid for it in action-sensitivity.
+
+### Correction: "not merely faster convergence" was wrong
+
+The 2026-08-01 entry, the `configs/dynamics.yaml` comment, and `cfe/dynamics/model.py:148-154`
+all assert residual is worth +22.4% at 600 steps and +14.5% at 2400, and that surviving 4x the
+budget proves it is not just faster convergence. **At full scale on the real dataset that does
+not hold.** Val loss, residual minus non-residual:
+
+```
+epoch     0       5      10      15      20      25      29
+delta   -54%   +0.6%   +1.2%   +4.9%   +2.4%   +2.8%   +3.0%
+```
+
+The head start is gone by epoch 5 and residual converges ~3% *worse* (final val 0.012002 vs
+0.011649). The train-val gap also inverts — non-residual 0.010582/0.011649 (10% gap), residual
+0.011725/0.012002 (2.4% gap) — so residual is **underfitting**: the delta constraint costs
+capacity the model was using. The reduced-scale diagnostic misled because on a 64-window overfit
+batch there is not enough data for lost capacity to bite.
+
+### What surprised me
+
+- **I over-read epoch-wise val separation three times in one session** ("widening each
+  checkpoint", "roughly halved", and the reduced-scale diagnostic that started this). `p2-dyn`'s
+  *own* model-twin separation swings 8.5%-11.8% across epochs with no trend. That +-3 point band
+  is the noise floor, and it is larger than the effect I kept forecasting from. CLAUDE.md says
+  to measure a metric's noise floor before reporting from it; I did not do that here, and it
+  cost three wrong calls in a row. Epoch-wise val separation cannot discriminate these runs.
+- Two independent architectures now agree that action-conditioning is worth 3.5-5% at h8. That
+  is the independent confirmation the repo asks for, and it means the weak result is not
+  plausibly a training or architecture artifact.
+
+### Hardware: measured, and not thermal
+
+Instrumented ramps replaced speculation. Both logs are in `~/runlogs/` and `~/*_ramp.csv`
+(deliberately in $HOME — WSL clears /tmp on every boot, which destroyed several earlier rounds).
+
+- **GPU ramp**, staged to 100% duty for 180 s: survived. Settles at 73-74°C / 55 W / 1560 MHz
+  after derating from a 110 W transient. No crash.
+- **CPU ramp**: survived ~9 min of full saturation. Throughput trend within the constant-config
+  final stage was **+2.3%** — flat, so the host CPU is not thermally throttling. Chassis proxy
+  (idle GPU temp) soaked +10°C and plateaued at 61°C.
+- **The OOM hypothesis is refuted for this workload.** Across the 97-minute training run, WSL
+  MemAvailable never fell below 3671 MiB and child RSS was flat at ~2985 MiB. GPU memory pinned
+  at 6869/8188 MiB with zero growth — worth remembering, since that is 84% of VRAM and Phase 3
+  runs rollouts alongside a loaded model.
+- **Correction:** the 2026-08-01 entry's advice to cap power with `nvidia-smi -pl 85` does not
+  work — ASUS OEM firmware refuses it. Silent mode was also wrong advice: it lowers fan RPM
+  along with TGP, the wrong direction if dissipation is the constraint.
+- **Correction:** `nvidia-smi`'s `SW/HW Thermal Slowdown` *counters* read 0 us on this die and
+  are unreliable — the `SW Power Capping` counter reads 0.06 s against 218 s of observed
+  capping. Per-second sampling of `clocks_throttle_reasons.active` is the trustworthy channel,
+  and it shows SW Thermal Slowdown (0x20) active in 119 samples at a mean of 75.0°C. The GPU
+  does throttle thermally, at a low trip point, which suggests degraded dissipation worth
+  cleaning — but it throttles *gracefully* and did not crash in 10 minutes of load.
+
+The machine did not crash once during ~2 hours of instrumented load today, including the full
+97-minute training run. The shutdown cause remains unidentified; no load hypothesis reproduced
+it, and the crash 91 s after a boot with nothing running is unexplained by any of them.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: FAIL (4/5).** Thresholds pre-registered 2026-07-31 are untouched.
+Per WORKFLOW P2's hard stop, no counterfactual search code is written until G2 passes.
+
+### Next
+
+1. **Decision for the user: is `residual: true` kept?** It is strictly better on
+   `beats_copy_last_latent` and strictly worse on the gated check and on val loss. Keeping it
+   means the h1/h2 pathology is fixed; reverting restores 0.0499 at h8. Neither passes G2. The
+   comments in `configs/dynamics.yaml:29-37` and `cfe/dynamics/model.py:148-154` still assert
+   the refuted "not merely faster convergence" claim and must be corrected either way.
+2. **The real question is whether the 0.20 bar is reachable at all in this latent space.** Two
+   architectures give 3.5% and 5.0%. Remaining candidates, in order: proprioception (§4.2
+   specifies latents + actions only, so this is a documented deviation), a finer reduction than
+   `grid4`, a larger `k_context`, and a shorter horizon. If none moves it, the honest conclusion
+   is that the pre-registered bar was miscalibrated for this representation — **which is a
+   measurement to bring to the user, not a threshold for me to lower.**
+3. `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
