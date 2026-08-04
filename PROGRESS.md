@@ -1090,3 +1090,80 @@ in `CHANGELOG.md`.
 is written** (CLAUDE.md rule 1), so it gets its own session and its own review. Every experiment
 built on it reports `random_perturb` (same edit budget) and `no_edit` alongside — the first says
 whether the world model does anything, the second catches replay bugs.
+
+## 2026-08-04 (Part B) — `cfe/eval/` written and ready to freeze
+
+### What landed
+
+`cfe/eval/` — `replay_protocol.py` and `metrics.py` per SPEC.md §6, plus 44 new tests. **132
+tests pass** (122 fast + the slow simulator ones). Nothing else was touched; no search code was
+written (WORKFLOW P2 is explicit).
+
+### Three decisions, taken with the user before writing
+
+1. **The gripper never enters an L2.** Reported edit magnitude and sparsity are over dims 0-5;
+   gripper changes are a separate flip count. SPEC.md §5's objective keeps its 7-dim
+   `||a'_t − a_t||²` — the divergence between *objective* and *reported metric* is deliberate
+   and flagged in both files, since averaging a near-binary dimension into a continuous norm and
+   calling it a distance is exactly the kind of thing that is invisible once frozen.
+2. **`max_steps_total = 300`, counted from the episode's first step**, so the policy-resume
+   budget is `300 − window_end`. An edited episode gets exactly the horizon the original had, a
+   late edit cannot buy extra time, and RSR stays comparable to the measured 72% BC rate.
+   CLAUDE.md is explicit that this knob moves the number, so it is fixed in the frozen file
+   rather than settable per run.
+3. **`cfe/eval/` does not import `cfe/policy/bc.py`.** The policy arrives as a plain callable and
+   the protocol owns its ~30 lines of stepping. `bc.py` is not frozen; importing it would leave a
+   hole in the freeze through which a later edit could change every prior number without anyone
+   touching a frozen file.
+
+### Things worth knowing later
+
+- **Termination is `done or check_success()`**, matching what `bc.rollout` did when the 72% was
+  measured. A different stopping rule would silently make RSR and the BC rate incomparable.
+- **`ReplayResult` carries no failure-mode classification and no object displacements.** Both
+  need object-key heuristics and a contact threshold that live in `bc.py`, and copying a
+  threshold into a frozen file means the two can disagree forever. Callers pass `obs_hook` and
+  accumulate what they want.
+- **`policy_never_ran` is recorded, not clamped.** A "primary" replay whose window ended at or
+  past the budget never ran step 4 and is not the primary variant; reporting it as one would
+  misattribute the result.
+- **§6's open-loop variant is an interpretation.** "Edited actions to the end" is read as *the
+  edited action sequence* — original, then edit, then original — run with no policy resume. The
+  other reading (extend the edit itself to episode end) is not an edit of bounded budget, so it
+  cannot be what a budget-swept metric means.
+- **`random_perturb` has no default `magnitude_scale`, deliberately.** Matching only `K` while
+  leaving perturbation size free makes §6's decisive baseline weak by construction — the single
+  easiest way to fake a positive result here. The frozen module cannot enforce the match, so it
+  refuses to guess and the obligation is documented at the call site.
+- **`expert_oracle` raises `NotApplicable` on natural failures** rather than substituting a
+  nearest-neighbour demo. Phase 1 verified no demo init state matches a benchmark init state, so
+  there is no expert from the same state and an approximate one is not an upper bound.
+- **`cause_top1_accuracy` excludes `cause = None`** and reports the count. Scoring unlabelled
+  natural failures as misses would make the metric a function of the natural/injected mix.
+- **No Wilson-interval helper existed in the repo** — CHANGELOG.md's [0.583, 0.825] for the BC
+  rate was computed ad-hoc. `metrics.py` implements it, and a test asserts it reproduces that
+  documented interval, so the new code agrees with an independently recorded number.
+
+### Verification
+
+- `make lint` clean, `make test` 122 passed, `make test-slow` 132 passed.
+- `no_edit` through `cfe/eval` agrees with Phase 1's `replay_episode` on 3 demos (slow test).
+- **Smoke check on 10 `p2-rollouts` episodes, 5 recorded success / 5 recorded failure: 10/10
+  reproduced exactly, no mismatches.** `no_edit` RSR on the failure episodes is **0/5 = 0%**,
+  which is §6's "~0% by construction". Successes terminated at exactly their recorded length;
+  failures ran to the 300-step timeout.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS (5/5).** Model of record `p2-dyn-res`.
+
+### Next
+
+1. **Review `cfe/eval/` line by line, then add the PreToolUse hook blocking edits to
+   `cfe/eval/**`** (WORKFLOW, between P2 and P3). Until the hook is in place the freeze is a
+   convention rather than a guarantee.
+2. Phase 3 is its own session: `build_failure_set.py` for §4.4's injected causes, the two-stage
+   CEM of §5, `run_replay.py` on the frozen eval code, and the G3 gate. `action_ignoring_dynamics`
+   is declared in `BASELINES` but raises `NotImplementedError` — it *is* the search run against
+   the twin, so Phase 3 must implement and register it. §6: every table reports all four
+   baselines or it does not ship.
