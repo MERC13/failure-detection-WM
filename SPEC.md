@@ -376,7 +376,10 @@ Each gate is a script that prints PASS/FAIL. Do not proceed past a FAIL.
 - **G2 (Phase 2)** — dynamics model beats copy-last-latent *and* action-ignoring dynamics on
   open-loop rollout error; goal-distance-vs-success Spearman ρ reported. **Hard stop: if the
   action-ignoring model is competitive, fix the dynamics model before writing any search
-  code.**
+  code.** (Amended 2026-08-04: the ≥20% margin over the action-ignoring twin is measured at
+  horizon **96** rather than 8. The threshold did not move — only the horizon it is measured
+  at, because §5's search rolls 100+ steps and h8 measured action-conditioning in a regime the
+  project never operates in. Reasoning and four rejected alternatives in `CHANGELOG.md`.)
 - **G3 (Phase 3, ~day 5)** — end-to-end skeleton on one task, 10 failures: search → replay →
   RSR reported with `random_perturb` and `no_edit`. **RSR must exceed `random_perturb` by a
   margin that survives a bootstrap CI, on injected failures.** If not, the honest move is to
