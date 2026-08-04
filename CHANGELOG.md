@@ -6,6 +6,76 @@ touches `cfe/eval/`.
 
 ---
 
+## 2026-08-04 — G2 `beats_action_ignoring`: magnitude criterion moved from h8 to h96
+
+**Changed.** `configs/dynamics.yaml:gate`. `min_rel_improvement_h8: 0.20` becomes
+`min_rel_improvement: 0.20` plus `rel_improvement_horizon: 96`. `scripts/verify_g2.py` follows,
+scoring the magnitude criterion on its own window set. `ci_horizons: [4, 8]` and
+`min_abs_spearman: 0.30` are **unchanged**.
+
+**The threshold did not move. 0.20 is still 0.20.** What moved is the horizon it is measured at.
+
+**Why.** SPEC.md §5's search rolls from the edit window to episode end — 100+ steps. h8 measured
+action-conditioning at the horizon where it is weakest, in a regime the project never operates
+in. Two measurements, both reproducible:
+
+*The horizon effect is real, not episode selection* (`scripts/diagnose_window_selection.py`,
+run `diag-window-p2dyn`, model `p2-dyn`). `rel_improvement` by horizon × minimum future frames:
+
+```
+              8        16        32        64        96       128
+   n=      2542      2422      2182      1702      1222       742
+h8      +0.0499   +0.0508   +0.0534   +0.0587   +0.0538   +0.0548
+h16           -   +0.0787   +0.0803   +0.0919   +0.0835   +0.0937
+h32           -         -   +0.1179   +0.1417   +0.1394   +0.1532
+h64           -         -         -   +0.2025   +0.2397   +0.2877
+h96           -         -         -         -   +0.2678   +0.3573
+```
+
+Down a column is horizon alone; across a row is selection alone. **Horizon 4.5–6.1×, selection
+1.10–1.42×**, and the h8 row is flat across window sets differing 3.4× in size. Long horizons
+are only measurable in long episodes, and this separates the two.
+
+*The model resolves fine action edits* (`scripts/diagnose_edit_discrimination.py`, run
+`diag-edit-p2dyn`). Feeding deliberately wrong actions raises error smoothly and **quadratically**
+— each 2× in edit size gives ~4× in error change — detectable down to 0.05 σ. That is a genuine
+local action gradient, so h8's weakness is a scale artifact and not fine-edit blindness. The
+action-ignoring twin is bit-identical under every perturbation, which validates the harness.
+
+**This was written after a gate failed, twice.** That is the exact shape CLAUDE.md rule 3 warns
+against and it is recorded plainly rather than presented as routine. Three things are offered as
+the defense, and a reader who finds them insufficient has every number needed to revert:
+
+1. The threshold is untouched; only the measurement point moved.
+2. The horizon was chosen on a criterion independent of the result — *the regime §5's search
+   operates in* — not by scanning for a horizon that passes.
+3. The assistant recommended **against** this change and argued for leaving h8 alone; the user
+   decided otherwise after both measurements were presented. It was not amended unilaterally.
+
+**Options rejected, and why:**
+
+| Option | Rejected because |
+|---|---|
+| Keep h8, lower 0.20 to ~0.05 | Straightforward threshold-weakening — changes only the number that failed and encodes no reason. This is what rule 3 exists to forbid. |
+| Gate at h64 instead | `p2-dyn` reads 0.2025 there against a 0.20 bar — a 1.25% margin, inside the noise measured on this quantity. A gate that marginal is not a gate. h64 is also still short of §5's regime, so it would be picked for its number rather than its meaning. |
+| Gate at h128 | Only 742 of 2542 windows, and the most selection-inflated column (1.42× at h64). Fewest windows and worst confound. |
+| Leave the gate, pursue proprioception / finer reduction / larger `k_context` | Still worth doing and not foreclosed by this change, but they are orthogonal model improvements. None addresses the fact that h8 measures the wrong regime, so none is a substitute for fixing the horizon. |
+| Move `ci_horizons` to long horizons as well | Not done deliberately. Requiring the CI to exclude zero at h4/h8 over all 2542 windows keeps a conservative short-horizon requirement that this amendment does not relax. |
+
+**Known consequence.** The magnitude criterion is now scored on **1222 windows rather than
+2542**, and those are systematically the longer episodes. The gate output reports
+`n_rel_criterion_windows` so the narrowing is visible in every run rather than implicit. The
+selection inflation at h96 is measured at 1.33× and is not corrected for.
+
+**Prior results affected.** Two G2 runs FAILed under the old criterion —
+`g2-20260801T014804Z` (`p2-dyn`, h8 rel 0.0499) and `g2-20260804T000955Z` (`p2-dyn-res`, h8 rel
+0.0350). **Both stand exactly as recorded**: they were correct measurements of h8, and h8 is
+still reported in every run. What changes is which horizon the pass/fail hinges on. Under the
+amended gate `p2-dyn` reads 0.2678 at h96 and would pass; that is a re-decision of the same
+model on a different criterion, not a new measurement of it.
+
+---
+
 ## 2026-07-31 — G1 success criterion: replace the 40–70% band
 
 **Changed.** SPEC.md §4.3 and §7 G1. The BC policy gate no longer tests a raw success-rate

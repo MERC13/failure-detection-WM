@@ -28,25 +28,30 @@ dynamics:
 
   # Predict `z[t+1..t+H]` as a delta off `z[t]` instead of synthesising the whole latent.
   #
-  # Tried in `p2-dyn-res` and REVERTED. The claim that first turned this on -- that residual is
-  # worth +22.4% at 600 steps and +14.5% at 2400, so the advantage "survives 4x the budget and is
-  # not merely faster convergence" -- did not survive full scale. On the real dataset the head
-  # start is gone by epoch 5 and residual converges ~3% WORSE (val 0.012002 vs 0.011649); the
-  # inverted train-val gap shows it underfitting, because the delta constraint costs capacity the
-  # model was using. The 64-window overfit batch the diagnostic ran on was too small for that
-  # cost to show.
+  # ON, because it is the only configuration that passes G2. Reverted to `false` on 2026-08-04
+  # and restored the same day when the amended gate was actually run; the reversal is recorded
+  # rather than quietly rewritten, because the reasoning behind it was wrong in an instructive
+  # way.
   #
-  # Reverted on the metric the project depends on, where residual is worse at every horizon:
-  #   rel_improvement   h8      h16     h32     h64
-  #   residual=false   0.0499  0.092   0.142   0.203
-  #   residual=true    0.0350  0.063   0.116   0.173
-  # It won only `beats_copy_last_latent`, which measures absolute prediction quality rather than
-  # action-sensitivity -- and it won that by making the model LESS responsive to actions, which
-  # is the one property SPEC.md 5's search cannot do without.
+  #   run          beats_copy_last   beats_action_ignoring @h96   G2
+  #   p2-dyn       FAIL              0.2678 PASS                  4/5 FAIL
+  #   p2-dyn-res   PASS              0.2238 PASS                  5/5 PASS
   #
-  # The code path and its tests are kept: this is a measured negative result worth being able to
-  # reproduce, not dead code. See PROGRESS.md 2026-08-03. No gate threshold moved for this.
-  residual: false
+  # `beats_copy_last_latent` never moved and `p2-dyn` had been failing it since 2026-08-01, so
+  # on unchanged criteria the standings were always p2-dyn 3/5 vs p2-dyn-res 4/5. The revert
+  # argued that action-sensitivity matters more than the gate says it does -- substituting
+  # judgement for the gate, which is not a call to make unilaterally.
+  #
+  # What stays true from the revert, and should be carried into Phase 3: residual IS less
+  # action-sensitive (0.2238 vs 0.2678 at h96, worse at every horizon), and it converges ~3%
+  # worse on val loss with an inverted train-val gap that shows it underfitting. It clears 0.20
+  # by 12% where plain clears it by 34%. If the search turns out to be starved of action signal,
+  # this flag is the first thing to revisit -- and `p2-dyn` is already trained and on disk.
+  #
+  # Also refuted: the original claim that residual is "not merely faster convergence" because it
+  # was worth +14.5% at 2400 steps. At full scale the head start is gone by epoch 5. The
+  # 64-window overfit batch that diagnostic ran on was too small for the lost capacity to show.
+  residual: true
 
 train:
   epochs: 30
@@ -75,6 +80,28 @@ eval:
 
 gate:
   # Pre-registered 2026-07-31, before the model was trained. See CHANGELOG.md if these change.
-  min_rel_improvement_h8: 0.20 # vs the action-ignoring twin, at horizon 8
   ci_horizons: [4, 8] # paired bootstrap CI must exclude zero at both
   min_abs_spearman: 0.30 # goal-latent distance vs task success
+
+  # AMENDED 2026-08-04 by the user, on measurement. Was `min_rel_improvement_h8: 0.20`.
+  #
+  # **The threshold did not move.** 0.20 is still 0.20. What moved is the horizon it is measured
+  # at, 8 -> 96, because h8 is not a regime this project ever operates in: SPEC.md §5's search
+  # rolls from the edit window to episode end, 100+ steps. h8 measured action-conditioning where
+  # it is weakest and the search runs where it is ~5x stronger.
+  #
+  # This is a gate change and it is logged in CHANGELOG.md with its reasoning and the three
+  # rejected alternatives. It was brought to the user as a measurement and decided by them, not
+  # amended unilaterally -- CLAUDE.md rule 3. The full basis:
+  #   - the horizon effect is real, not episode selection (4.5-6.1x horizon vs 1.1-1.5x
+  #     selection; the h8 row is flat across window sets differing 3.4x in size)
+  #   - the model has a genuine smooth action gradient (quadratic edit response, detectable to
+  #     0.05 std), so h8 weakness is a scale artifact rather than fine-edit blindness
+  # Both measurements are in PROGRESS.md 2026-08-03/04 and reproducible via
+  # scripts/diagnose_window_selection.py and scripts/diagnose_edit_discrimination.py.
+  #
+  # h96 is scored on the windows that can supply 96 future frames (1222 of 2542), which is a
+  # smaller and longer-episode population than the CI criterion above uses. That is a real
+  # narrowing and is reported in the gate output rather than hidden.
+  min_rel_improvement: 0.20
+  rel_improvement_horizon: 96

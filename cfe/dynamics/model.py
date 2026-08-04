@@ -148,14 +148,17 @@ class LatentDynamics(nn.Module):
             # Predict a delta off the last context frame rather than the whole latent.
             # Broadcasts (B, 1, R, D) across the H predicted frames.
             #
-            # OFF by default, and that default is a result rather than a preference. Turning this
-            # on does fix `beats_copy_last_latent` -- it starts the model at copy-last-latent by
-            # construction, so h1 goes -33.4% -> +2.07% -- but it makes the model measurably less
-            # action-sensitive, which is worse on the only capability the counterfactual search
-            # needs: rel_improvement at h8 falls 0.0499 -> 0.0350 and stays lower at every
-            # horizon out to h64. It also converges ~3% worse and underfits. Kept because a
-            # reproducible negative result is worth more than a deleted branch.
-            # Full numbers in PROGRESS.md 2026-08-03; run `p2-dyn-res`.
+            # ON in configs/dynamics.yaml, because it is the only configuration that passes G2:
+            # it starts the model at copy-last-latent by construction, so `beats_copy_last_latent`
+            # goes from FAIL (h1 -33.4%) to PASS (h1 +2.07%), and that check has never moved.
+            #
+            # The cost is real and is not cancelled by passing: residual is measurably LESS
+            # action-sensitive at every horizon (rel_improvement at the gated h96 is 0.2238 vs
+            # 0.2678 without it), and action-sensitivity is what SPEC.md 5's search consumes. It
+            # also converges ~3% worse and underfits. If the search is ever starved of action
+            # signal, this flag is the first thing to revisit; `p2-dyn` is the trained
+            # counterfactual and is already on disk.
+            # Full numbers in PROGRESS.md 2026-08-03/04; runs `p2-dyn` and `p2-dyn-res`.
             pred = pred + context[:, -1:]
         return pred
 

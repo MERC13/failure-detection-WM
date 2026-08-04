@@ -105,15 +105,39 @@ def check_beats_copy_last(model_err: dict, copy_err: dict, horizons: list[int]) 
 
 
 def check_beats_action_ignoring(
-    model_err: dict, twin_err: dict, gate: dict, n_boot: int, seed: int
+    model_err: dict,
+    twin_err: dict,
+    rel_model_err: dict,
+    rel_twin_err: dict,
+    gate: dict,
+    n_boot: int,
+    seed: int,
 ) -> Result:
-    """The gate. Criteria are read from the config, where they were pre-registered."""
+    """The gate. Criteria are read from the config, where they were pre-registered.
+
+    Two criteria on two different window sets, which is why the errors arrive in two pairs:
+
+    - the **CI criterion** runs on the short gated horizons over every window (`model_err`);
+    - the **magnitude criterion** runs at `gate["rel_improvement_horizon"]` (`rel_model_err`),
+      which only longer episodes can supply, so it necessarily scores fewer windows.
+
+    Scoring them on one set is not possible: a window set that can supply 96 future frames
+    excludes a third of the episodes, and applying that restriction to the CI criterion would
+    silently change a criterion nobody decided to change.
+    """
     from cfe.dynamics.latents import paired_bootstrap_ci
 
     ci_horizons = [int(h) for h in gate["ci_horizons"]]
-    min_rel = float(gate["min_rel_improvement_h8"])
+    min_rel = float(gate["min_rel_improvement"])
+    rel_h = int(gate["rel_improvement_horizon"])
 
-    detail = {"criteria": {"ci_excludes_zero_at": ci_horizons, "min_rel_improvement_h8": min_rel}}
+    detail = {
+        "criteria": {
+            "ci_excludes_zero_at": ci_horizons,
+            "min_rel_improvement": min_rel,
+            "rel_improvement_horizon": rel_h,
+        }
+    }
     ci_ok = True
     for h in sorted(set(ci_horizons) | set(model_err)):
         m, t = float(model_err[h].mean()), float(twin_err[h].mean())
@@ -132,10 +156,22 @@ def check_beats_action_ignoring(
         if h in ci_horizons:
             ci_ok = ci_ok and ci["excludes_zero"] and ci["ci_low"] > 0
 
-    rel_h8 = detail["h8"]["rel_improvement"]
+    rm, rt = float(rel_model_err[rel_h].mean()), float(rel_twin_err[rel_h].mean())
+    rel = (rt - rm) / rt if rt else 0.0
+    rel_ci = paired_bootstrap_ci(rel_twin_err[rel_h], rel_model_err[rel_h], n_boot, seed)
+    detail[f"h{rel_h}"] = {
+        "model": round(rm, 6),
+        "action_ignoring": round(rt, 6),
+        "rel_improvement": round(rel, 4),
+        "ci_low": round(rel_ci["ci_low"], 6),
+        "ci_high": round(rel_ci["ci_high"], 6),
+        "excludes_zero": rel_ci["excludes_zero"],
+        "n_pairs": rel_ci["n_pairs"],
+        "is_magnitude_criterion": True,
+    }
     detail["ci_criterion_met"] = ci_ok
-    detail["rel_criterion_met"] = rel_h8 >= min_rel
-    return Result("beats_action_ignoring", ci_ok and rel_h8 >= min_rel, detail)
+    detail["rel_criterion_met"] = rel >= min_rel
+    return Result("beats_action_ignoring", ci_ok and rel >= min_rel, detail)
 
 
 def check_goal_distance_correlates(probe_run: str | None, gate: dict, reduction: str) -> Result:
@@ -274,18 +310,35 @@ def main() -> int:
     gated_idx = WindowIndex(val_eps, dyn_cfg.k_context, dyn_cfg.horizon, 1)
     diag_chunks = max(diag_horizons) // dyn_cfg.horizon
     diag_idx = WindowIndex(val_eps, dyn_cfg.k_context, dyn_cfg.horizon, diag_chunks)
+    # The magnitude criterion moved to a long horizon on 2026-08-04 (CHANGELOG.md), and only
+    # longer episodes can supply that many future frames, so it gets its own window set.
+    rel_h = int(gate["rel_improvement_horizon"])
+    rel_idx = WindowIndex(val_eps, dyn_cfg.k_context, dyn_cfg.horizon, rel_h // dyn_cfg.horizon)
     print(
-        f"windows: {len(gated_idx)} gated, {len(diag_idx)} for horizons up to {max(diag_horizons)}"
+        f"windows: {len(gated_idx)} gated, {len(diag_idx)} for horizons up to "
+        f"{max(diag_horizons)}, {len(rel_idx)} for the h{rel_h} magnitude criterion"
     )
     print("-" * 78)
 
     model_err = per_window_errors(models["dynamics"], gated_idx, horizons, batch_size, device)
     twin_err = per_window_errors(models["action_ignoring"], gated_idx, horizons, batch_size, device)
     copy_err = copy_last_latent_errors(gated_idx, horizons, batch_size)
+    rel_model_err = per_window_errors(models["dynamics"], rel_idx, [rel_h], batch_size, device)
+    rel_twin_err = per_window_errors(
+        models["action_ignoring"], rel_idx, [rel_h], batch_size, device
+    )
 
     results = [
         check_beats_copy_last(model_err, copy_err, horizons),
-        check_beats_action_ignoring(model_err, twin_err, gate, int(ev["n_bootstrap"]), args.seed),
+        check_beats_action_ignoring(
+            model_err,
+            twin_err,
+            rel_model_err,
+            rel_twin_err,
+            gate,
+            int(ev["n_bootstrap"]),
+            args.seed,
+        ),
         check_goal_distance_correlates(args.probe_run, gate, dyn_cfg.reduction),
         check_eval_is_deterministic(models["dynamics"], gated_idx, horizons, batch_size, device),
         check_config_snapshot(run_dir),
@@ -354,6 +407,7 @@ def main() -> int:
                     "n_val_episodes": len(val_eps),
                     "n_gated_windows": len(gated_idx),
                     "n_diagnostic_windows": len(diag_idx),
+                    "n_rel_criterion_windows": len(rel_idx),
                 },
                 default=str,
             )

@@ -1035,3 +1035,58 @@ rejected alternatives. If it is not taken, the remaining levers are propriocepti
 §4.2 deviation), a finer reduction than `grid4`, and a larger `k_context`.
 
 `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
+
+## 2026-08-04 (later) — gate amended by the user; **G2 PASS 5/5**; residual revert reversed
+
+### What landed
+
+- **G2's magnitude criterion moved from h8 to h96**, decided by the user after both diagnostics
+  were presented. Threshold unchanged at 0.20; only the horizon moved. `ci_horizons: [4, 8]` and
+  `min_abs_spearman: 0.30` untouched. Logged in `CHANGELOG.md` with reasoning and four rejected
+  alternatives. `scripts/verify_g2.py` scores the magnitude criterion on its own window set
+  (1222 of 2542, since only longer episodes supply 96 future frames) and reports
+  `n_rel_criterion_windows` so the narrowing is visible in every run.
+- **`residual` restored to `true`.** The revert earlier the same day was wrong.
+- **G2: PASS 5/5** on `p2-dyn-res` (`g2-20260804T185522Z`).
+
+### The revert was wrong, and the way it was wrong is the lesson
+
+```
+                    beats_copy_last   beats_action_ignoring @h96   G2
+p2-dyn (plain)          FAIL              0.2678 PASS            4/5 FAIL
+p2-dyn-res              PASS              0.2238 PASS            5/5 PASS
+```
+
+`beats_copy_last_latent` never moved, and `p2-dyn` had been failing it since 2026-08-01. So on
+criteria that never changed the standings were **always p2-dyn 3/5 vs p2-dyn-res 4/5** —
+`p2-dyn-res` was a full check ahead the whole time. The gate amendment fixed the one criterion
+both were failing, so the model already ahead came out on top. Predictable in hindsight; not
+predicted.
+
+The revert recommended the model scoring *lower* on the pre-registered gate, on the argument
+that action-sensitivity matters more than the gate says. That is substituting judgement for the
+gate. The argument was not wrong on the facts — residual **is** less action-sensitive at every
+horizon — it was wrong about whose call it was.
+
+**The trade-off it identified still stands and is carried forward:** `p2-dyn-res` clears 0.20 by
+12% where `p2-dyn` clears it by 34%, and it converges ~3% worse with an inverted train-val gap
+showing it underfits. If Phase 3's search is starved of action signal, `residual` is the first
+flag to revisit and `p2-dyn` is already trained and on disk.
+
+**Worth stating plainly:** two models and two gate configurations were tried, and something
+passes. That pattern deserves suspicion. What defends it is that `beats_copy_last_latent` was
+fixed *before* any gate change and its result never moved, so no newly-discovered fact was
+reached for to justify the switch. A reader who finds that insufficient has every number needed
+in `CHANGELOG.md`.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS (5/5).** Model of record: `p2-dyn-res`, gate run
+`g2-20260804T185522Z`. WORKFLOW P2's hard stop is cleared.
+
+### Next
+
+`cfe/eval/` (WORKFLOW P2 Part B): `metrics.py` and `replay_protocol.py`. **Frozen the moment it
+is written** (CLAUDE.md rule 1), so it gets its own session and its own review. Every experiment
+built on it reports `random_perturb` (same edit budget) and `no_edit` alongside — the first says
+whether the world model does anything, the second catches replay bugs.
