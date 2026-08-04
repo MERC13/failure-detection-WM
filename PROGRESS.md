@@ -941,3 +941,97 @@ Per WORKFLOW P2's hard stop, no counterfactual search code is written until G2 p
    is that the pre-registered bar was miscalibrated for this representation — **which is a
    measurement to bring to the user, not a threshold for me to lower.**
 3. `cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.
+
+## 2026-08-04 — residual reverted; three diagnostics; the horizon question put to a decision
+
+### What landed
+
+- **`residual` reverted to `false`.** Non-residual is better on the metric the project depends
+  on at every horizon (`rel_improvement` h8 0.0499 vs 0.0350, h64 0.203 vs 0.173). Residual won
+  only `beats_copy_last_latent`, and won it by making the model less action-sensitive. The code
+  path and its four tests are kept: a reproducible negative result beats a deleted branch.
+  Numbers are recorded at `configs/dynamics.yaml` and `cfe/dynamics/model.py` so the default
+  reads as a result rather than a preference. **No gate threshold moved.**
+- Three diagnostics, none of which gate anything: `diagnose_action_horizon.py`,
+  `diagnose_window_selection.py`, `diagnose_edit_discrimination.py`.
+
+### Action-conditioning benefit is horizon-driven, not episode-selection-driven
+
+The first sweep to h96/h128 looked decisive (+28.9% at h96) until its own built-in cross-check
+disagreed with the gate at h8 — 0.0393 vs 0.0350 — which exposed the confound: long horizons are
+only measurable in long episodes. `diagnose_window_selection.py` separates them by computing
+every (horizon, window-set) pair.
+
+```
+              8        16        32        64        96       128   <- min future frames
+   n=      2542      2422      2182      1702      1222       742
+h8      +0.0350   +0.0347   +0.0347   +0.0380   +0.0369   +0.0393
+h16           -   +0.0586   +0.0572   +0.0630   +0.0635   +0.0757
+h32           -         -   +0.1005   +0.1158   +0.1291   +0.1456
+h64           -         -         -   +0.1729   +0.2129   +0.2555
+h96           -         -         -         -   +0.2238   +0.2892
+```
+
+Down a column is pure horizon; across a row is pure selection. **Horizon 4.5x-6.1x, selection
+1.12x-1.48x**, and the h8 row is nearly flat across window sets differing 3.4x in size. The
+trend is real. Correction to an intermediate claim made here: the curve does **not** cross 0.20
+at h64 — that used the selection-inflated 0.2555. On the largest set that can measure h64 it is
+0.1729. The unconfounded crossing is between h64 and h96 (h96 = 0.2238 on 1222 windows).
+
+### The model does resolve small action edits
+
+`beats_action_ignoring` only asks whether actions help *on average*. A model could pass it by
+predicting coarse drift while being blind to the fine edits §5's search makes, and **no gate
+tests that**. Ground truth needs no simulator: feed the model wrong actions and the error must
+rise, with the shape of the rise as a function of edit size being the answer.
+
+```
+      edit      h8 delta       rel     h64 delta       rel     (p2-dyn, 1702 windows)
+  0.05 std     +0.000019    +0.02%     +0.000075    +0.05%     all CIs exclude zero
+  0.10 std     +0.000070    +0.07%     +0.000344    +0.25%
+  0.25 std     +0.000435    +0.41%     +0.002225    +1.60%
+  0.50 std     +0.001823    +1.71%     +0.007939    +5.70%
+  1.00 std     +0.007140    +6.70%     +0.022491   +16.15%
+  shuffled     +0.050657   +47.54%     +0.115286   +82.79%
+```
+
+Response is **quadratic** — each 2x in edit size gives ~4x in error change — which is the
+signature of a smooth local gradient, not coarse-motion-only behaviour. Detectable down to 0.05
+std. The action-ignoring twin is bit-identical under every perturbation, which validates the
+harness; without that control none of the rows would mean anything.
+
+Only the 6 EE-delta dims are perturbed. Scaling Gaussian noise by the gripper dimension's std
+would not be the same operation, per CLAUDE.md; gripper edits are a separate question.
+
+**Caveat worth carrying into Phase 3:** at search-scale edits the effect is small relative to
+the model's own error — a full 1.0-std edit moves h8 error by 6.7%, so model inaccuracy is ~15x
+the edit effect (~6x at h64). Systematic error may partly cancel when *comparing* edits, which
+is what the search does, so this is a concern rather than a verdict. It does argue the search
+needs longer horizons or larger edits to accumulate usable signal.
+
+### What surprised me
+
+- A diagnostic's own sanity cross-check caught a confound that would otherwise have produced a
+  confident, wrong recommendation to move the gate. Recomputing a number the gate already knows
+  cost nothing and was the most valuable line in the script.
+- Quadratic edit response was not something I expected to be so clean.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: FAIL (3/5 with residual reverted; `p2-dyn` is the current model).**
+Thresholds pre-registered 2026-07-31 are untouched. WORKFLOW P2's hard stop still applies.
+
+### Next — an open decision for the user, not for me
+
+**Is h8 the right horizon for `beats_action_ignoring`?** The evidence for re-examining it is now
+independent of "it would pass": the model has a genuine smooth action gradient, the benefit is
+~6x stronger at the horizons §5's search actually runs at, and that is horizon-driven rather
+than selection-driven. The evidence against changing it: 0.20-at-h8 was pre-registered, and
+picking a horizon after seeing which one passes is the exact shape of the failure CLAUDE.md
+rule 3 exists to prevent.
+
+**I am not making this call.** If it is taken it goes in `CHANGELOG.md` with reasoning and
+rejected alternatives. If it is not taken, the remaining levers are proprioception (a documented
+§4.2 deviation), a finer reduction than `grid4`, and a larger `k_context`.
+
+`cfe/eval/` (WORKFLOW P2 Part B) is still unwritten and is frozen the moment it is.

@@ -27,14 +27,26 @@ dynamics:
   latent_dim: 768 # DINOv2-base token width
 
   # Predict `z[t+1..t+H]` as a delta off `z[t]` instead of synthesising the whole latent.
-  # Added after the first G2 run FAILED, on measurement rather than intuition: at matched scale
-  # and matched step budget, residual is worth +22.4% at 600 steps and +14.5% at 2400, so the
-  # advantage survives 4x the budget and is not merely faster convergence.
   #
-  # This is an architecture change, NOT a gate change. Nothing in `gate:` below moved, and the
-  # first run's FAIL stands on the record either way. Full reasoning and the falsifiable
-  # prediction made before this run are in PROGRESS.md 2026-08-01.
-  residual: true
+  # Tried in `p2-dyn-res` and REVERTED. The claim that first turned this on -- that residual is
+  # worth +22.4% at 600 steps and +14.5% at 2400, so the advantage "survives 4x the budget and is
+  # not merely faster convergence" -- did not survive full scale. On the real dataset the head
+  # start is gone by epoch 5 and residual converges ~3% WORSE (val 0.012002 vs 0.011649); the
+  # inverted train-val gap shows it underfitting, because the delta constraint costs capacity the
+  # model was using. The 64-window overfit batch the diagnostic ran on was too small for that
+  # cost to show.
+  #
+  # Reverted on the metric the project depends on, where residual is worse at every horizon:
+  #   rel_improvement   h8      h16     h32     h64
+  #   residual=false   0.0499  0.092   0.142   0.203
+  #   residual=true    0.0350  0.063   0.116   0.173
+  # It won only `beats_copy_last_latent`, which measures absolute prediction quality rather than
+  # action-sensitivity -- and it won that by making the model LESS responsive to actions, which
+  # is the one property SPEC.md 5's search cannot do without.
+  #
+  # The code path and its tests are kept: this is a measured negative result worth being able to
+  # reproduce, not dead code. See PROGRESS.md 2026-08-03. No gate threshold moved for this.
+  residual: false
 
 train:
   epochs: 30

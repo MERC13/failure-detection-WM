@@ -145,12 +145,17 @@ class LatentDynamics(nn.Module):
         pred = pred.reshape(b, cfg.horizon, cfg.r, cfg.latent_dim)
 
         if cfg.residual:
-            # Predict a delta off the last context frame rather than the whole latent. Measured,
-            # not assumed: at matched scale and matched step budget this is worth +22.4% at 600
-            # steps and +14.5% at 2400, so it is not merely faster convergence (PROGRESS.md
-            # 2026-08-01). It also starts the model at copy-last-latent, which is the baseline
-            # `beats_copy_last_latent` compares against and which the non-residual model lost to
-            # at short horizons. Broadcasts (B, 1, R, D) across the H predicted frames.
+            # Predict a delta off the last context frame rather than the whole latent.
+            # Broadcasts (B, 1, R, D) across the H predicted frames.
+            #
+            # OFF by default, and that default is a result rather than a preference. Turning this
+            # on does fix `beats_copy_last_latent` -- it starts the model at copy-last-latent by
+            # construction, so h1 goes -33.4% -> +2.07% -- but it makes the model measurably less
+            # action-sensitive, which is worse on the only capability the counterfactual search
+            # needs: rel_improvement at h8 falls 0.0499 -> 0.0350 and stays lower at every
+            # horizon out to h64. It also converges ~3% worse and underfits. Kept because a
+            # reproducible negative result is worth more than a deleted branch.
+            # Full numbers in PROGRESS.md 2026-08-03; run `p2-dyn-res`.
             pred = pred + context[:, -1:]
         return pred
 
