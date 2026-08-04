@@ -277,6 +277,31 @@ def test_a_window_past_the_end_of_the_episode_is_rejected():
         identity_edit(original, 8, 4)
 
 
+def test_an_edit_copies_its_actions_and_cannot_be_mutated_afterwards():
+    """`np.asarray` returns a *view* of a float64 array, so without the copy `identity_edit`
+    would hand back a window into the caller's episode and mutating the episode would change an
+    edit that had already been replayed."""
+    original = _episode(12)
+    edit = identity_edit(original, 4, 4)
+    before = edit.actions.copy()
+
+    original[4:8] = -999.0
+    assert np.array_equal(edit.actions, before), "the edit aliased the caller's array"
+
+    with pytest.raises(ValueError):
+        edit.actions[0, 0] = 1.0
+
+
+def test_edits_compare_by_value_instead_of_raising():
+    """A dataclass-generated __eq__ compares numpy arrays inside a tuple, which raises
+    `truth value of an array is ambiguous` rather than answering."""
+    a = Edit(window_start=2, actions=np.ones((3, 7)))
+    assert a == Edit(window_start=2, actions=np.ones((3, 7)))
+    assert a != Edit(window_start=3, actions=np.ones((3, 7)))
+    assert a != Edit(window_start=2, actions=np.zeros((3, 7)))
+    assert a != "not an edit"
+
+
 def test_budget_k_and_window_end_follow_from_the_edit():
     edit = Edit(window_start=5, actions=np.zeros((8, 7)))
     assert edit.budget_k == 8

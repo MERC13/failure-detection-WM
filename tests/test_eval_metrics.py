@@ -242,6 +242,27 @@ def test_random_perturb_matches_the_budget_and_leaves_the_gripper_alone():
     assert edit_magnitude(original[4:12], edit.actions)["mean_l2_ee"] > 0
 
 
+def test_random_perturb_realises_exactly_the_requested_l2():
+    """§6's baseline must be matched on magnitude, not merely on budget.
+
+    Scaling six standard normals by `s` would give a per-step L2 of `s·√6 ≈ 2.45 s`, making the
+    decisive baseline 2.45x stronger than the search it is compared against — with nothing
+    downstream to reveal it. The realised magnitude must equal the requested one.
+    """
+    rng = np.random.default_rng(0)
+    original = np.zeros((20, 7))  # far from the clip bounds, so nothing is truncated
+    for scale in (0.05, 0.2, 0.5):
+        edit = random_perturb(original, 0, 12, rng, magnitude_scale=scale)
+        out = edit_magnitude(original[0:12], edit.actions)
+        assert out["mean_l2_ee"] == pytest.approx(scale, rel=1e-9)
+        assert out["max_l2_ee"] == pytest.approx(scale, rel=1e-9)
+
+
+def test_random_perturb_rejects_a_negative_magnitude():
+    with pytest.raises(ValueError, match="magnitude_scale"):
+        random_perturb(np.zeros((10, 7)), 0, 4, np.random.default_rng(0), magnitude_scale=-1.0)
+
+
 def test_random_perturb_clips_into_the_valid_action_range():
     rng = np.random.default_rng(0)
     edit = random_perturb(np.zeros((10, 7)), 0, 10, rng, magnitude_scale=50.0)

@@ -295,27 +295,38 @@ def random_perturb(
     window_start: int,
     budget_k: int,
     rng: np.random.Generator,
-    magnitude_scale: float | np.ndarray,
+    magnitude_scale: float,
     action_low: float = -1.0,
     action_high: float = 1.0,
 ) -> Edit:
     """§6: random deltas at the **same edit budget**. The baseline that decides if this is real.
 
+    `magnitude_scale` is **the target per-step L2 of the delta**, in the same units and over the
+    same dims 0-5 that `edit_magnitude` reports, so it can be passed straight from the search's
+    realised `edit_magnitude(...)["mean_l2_ee"]` and the match is exact by construction. Each
+    step gets a delta of exactly that norm in a uniformly random direction on the 6-sphere.
+
+    Scaling six independent standard normals by `s` would give a per-step L2 of `s·√6 ≈ 2.45 s`,
+    not `s` — so the obvious implementation makes this baseline 2.45x stronger than the
+    magnitude it was asked to match, in a way nothing downstream would reveal. Normalising the
+    direction removes the dimension-count dependence entirely.
+
     `magnitude_scale` is required and has no default **on purpose**. Matching only `K` while
     leaving the perturbation size free would make this baseline weak by construction — tiny
     random deltas fail trivially and the search would "win" against nothing. §6 calls this the
     baseline that decides whether the project is real, so it must be matched on budget *and*
-    magnitude, with the scale taken from the search's *realised* edit magnitudes
-    (`edit_magnitude(...)["mean_l2_ee"]`).
-
-    That matching is a caller obligation this frozen module cannot enforce, and it is the
-    single easiest way to fake a positive result in this project. Stated here so it cannot be
-    forgotten quietly.
+    magnitude. That the scale comes from the search's realised edits is a caller obligation this
+    frozen module cannot enforce, and it is the single easiest way to fake a positive result
+    here. Stated so it cannot be forgotten quietly.
 
     Only dims 0-5 are perturbed; the gripper is left alone, consistent with the reported
     metrics. Actions are clipped to the env's valid range so the baseline lives in the same
-    action space the search does.
+    action space the search does — which means the *realised* magnitude can come in under
+    `magnitude_scale` when the original action is already near a bound. Callers comparing arms
+    should report `edit_magnitude` of what was actually replayed, not the requested scale.
     """
+    if magnitude_scale < 0:
+        raise ValueError(f"magnitude_scale must be >= 0, got {magnitude_scale}")
     original = np.asarray(original_actions, dtype=np.float64)
     edited = original[window_start : window_start + budget_k].copy()
     if edited.shape[0] != budget_k:
@@ -323,8 +334,11 @@ def random_perturb(
             f"window [{window_start}, {window_start + budget_k}) runs past the episode's "
             f"{len(original)} actions"
         )
-    noise = rng.standard_normal(size=(budget_k, 6)) * magnitude_scale
-    edited[:, EE_SLICE] = np.clip(edited[:, EE_SLICE] + noise, action_low, action_high)
+    direction = rng.standard_normal(size=(budget_k, 6))
+    norms = np.linalg.norm(direction, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0  # measure-zero, but a zero-norm row would divide by zero
+    delta = direction / norms * magnitude_scale
+    edited[:, EE_SLICE] = np.clip(edited[:, EE_SLICE] + delta, action_low, action_high)
     return Edit(window_start=window_start, actions=edited)
 
 

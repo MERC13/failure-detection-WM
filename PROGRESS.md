@@ -1167,3 +1167,65 @@ written (WORKFLOW P2 is explicit).
    is declared in `BASELINES` but raises `NotImplementedError` — it *is* the search run against
    the twin, so Phase 3 must implement and register it. §6: every table reports all four
    baselines or it does not ship.
+
+## 2026-08-04 (Part B, cont.) — pre-freeze review found three real defects; freeze now enforced
+
+### Review of `cfe/eval/` before freezing — three defects, all fixed
+
+Reviewing before the hook went on was worth it: a bug found now is free, and after the freeze
+each one would have cost a `CHANGELOG.md` entry, sign-off, and the reinterpretation of every
+number already reported.
+
+1. **`random_perturb` produced edits ~2.45x larger than requested.** Scaling six independent
+   standard normals by `s` gives a per-step L2 of `s·√6`, not `s`. A caller passing the search's
+   `edit_magnitude(...)["mean_l2_ee"]` — the obvious and intended thing — would have got a
+   random baseline 2.45x stronger than the search it was matched against, and **nothing
+   downstream would have revealed it**. §6 calls `random_perturb` "the baseline that decides
+   whether the project is real", so this was the single most damaging bug available in the file.
+   Fixed by normalising the direction and scaling to the target norm, so the realised per-step
+   L2 equals `magnitude_scale` exactly. `magnitude_scale` is now documented as a *target L2*
+   rather than a per-dimension std, and a test asserts the realised magnitude matches to 1e-9.
+2. **`Edit` was not actually frozen.** `np.asarray` returns a *view* of a float64 array, so
+   `identity_edit` handed back a window into the caller's episode; mutating that episode would
+   silently change an edit that had already been replayed, breaking the correspondence between
+   a result and the edit it is filed under. Now copies and sets `writeable = False`.
+3. **`Edit.__eq__` raised instead of answering.** The dataclass-generated `__eq__` compares
+   numpy arrays inside a tuple, which raises `ValueError: truth value of an array is ambiguous`.
+   Latent until something compared two edits. Now `eq=False` plus an explicit `__eq__` using
+   `np.array_equal`; `Edit` is unhashable as a result, which is honest since it holds an array.
+
+Four new tests pin all three. **126 fast tests pass**, `make test-slow` 132.
+
+### The freeze is now enforced, not just documented
+
+`.claude/settings.json` plus two `PreToolUse` hooks, per WORKFLOW.md's "hard enforcement for the
+things that matter":
+
+- `block_frozen_eval.py` — refuses Edit/Write/NotebookEdit under `cfe/eval/`.
+- `block_bash_violations.py` — refuses `git push`, and refuses shell writes into `cfe/eval/`
+  (`sed -i`, redirects, `rm`/`mv`/`cp`/`tee`, `git checkout -- cfe/eval/`). A hook guarding only
+  the file tools is sidestepped by reaching for the shell, which is not malice, just the nearest
+  tool. Freezing a path means freezing it against every route.
+
+Verified across **19 cases**: frozen paths blocked by both routes; `cfe/dynamics/`,
+`tests/test_eval_metrics.py`, `git commit`, and *reading* frozen files all still allowed. The
+tests are deliberately not frozen — only the module is.
+
+Both hooks fail open if they cannot parse their payload: a broken hook must not halt the repo.
+**To make a legitimate change to frozen code**, the friction is the point — get it approved, log
+it in `CHANGELOG.md` with reason and rejected alternatives, disable the hook deliberately for
+that edit, re-enable it.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS (5/5).** `cfe/eval/` written, reviewed, and frozen.
+Phase 2 is complete.
+
+### Next — Phase 3, its own session
+
+`build_failure_set.py` for §4.4's injected causes, the two-stage CEM of §5, `run_replay.py` on
+the frozen eval code, and the **G3 gate**: RSR must exceed `random_perturb` by a margin that
+survives a bootstrap CI, on injected failures. `action_ignoring_dynamics` is declared in
+`BASELINES` but raises `NotImplementedError` — it *is* the search run against the twin, so
+Phase 3 must implement and register it. §6: every table reports all four baselines or it does
+not ship.

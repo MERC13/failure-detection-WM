@@ -54,25 +54,44 @@ PRIMARY = "primary"
 OPEN_LOOP = "open_loop"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Edit:
     """An edit to an episode's actions: replace `actions` starting at `window_start`.
 
     The edit budget `K` is the window length, enforced *structurally* — there is nowhere to put
     a longer edit — which is what SPEC.md §5 means by "enforced structurally by the window, not
     by a penalty".
+
+    `actions` is **copied and made read-only** on construction. `np.asarray` returns a view when
+    handed a float64 array, so without the copy `identity_edit` would return a window into the
+    caller's episode and mutating that episode would silently change an edit that had already
+    been replayed. "Frozen" has to mean the contents too, or a replayed result stops
+    corresponding to the edit it is filed under.
+
+    `eq=False` with an explicit `__eq__` because the generated one compares numpy arrays inside
+    a tuple, which raises `ValueError: truth value of an array is ambiguous` rather than
+    answering. Defining `__eq__` also makes `Edit` unhashable, which is honest — it holds an
+    array.
     """
 
     window_start: int
     actions: np.ndarray  # (W, 7)
 
     def __post_init__(self) -> None:
-        a = np.asarray(self.actions, dtype=np.float64)
+        a = np.array(self.actions, dtype=np.float64)  # always a copy; see the class docstring
         if a.ndim != 2 or a.shape[1] != ACTION_DIM:
             raise ValueError(f"edit actions must be (W, {ACTION_DIM}), got {a.shape}")
         if self.window_start < 0:
             raise ValueError(f"window_start must be >= 0, got {self.window_start}")
+        a.flags.writeable = False
         object.__setattr__(self, "actions", a)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Edit):
+            return NotImplemented
+        return self.window_start == other.window_start and np.array_equal(
+            self.actions, other.actions
+        )
 
     @property
     def budget_k(self) -> int:
