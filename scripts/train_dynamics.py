@@ -166,15 +166,36 @@ def main() -> int:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    ids = cache.episode_ids()
+    # SPEC.md §4.2: "LIBERO demos plus policy rollouts (successes *and* failures)". Those two
+    # sources and no others. Phase 3 added a third kind of episode to this flat, shared cache —
+    # injected failures — and `cache.episode_ids()` returns everything in it, so an unfiltered
+    # re-run would quietly train the world model on synthetic corruptions that §4.2 never named.
+    #
+    # This changes no recorded result: `p2-dyn` and `p2-dyn-res` were trained before any injected
+    # episode existed, so the filter restores their composition rather than altering it. The
+    # per-task counts are printed and recorded because the cache now spans more than one task,
+    # and a retrain that silently widened its training set would be invisible otherwise.
+    from cfe.data.demos import DEMO, ROLLOUT, episode_kind
+
+    all_ids = cache.episode_ids()
+    ids = [e for e in all_ids if episode_kind(e) in (DEMO, ROLLOUT)]
     if args.limit_episodes:
         ids = ids[: args.limit_episodes]
-    n_demo = sum(1 for e in ids if "_demo_" in e)
+    n_demo = sum(1 for e in ids if episode_kind(e) == DEMO)
     n_roll = len(ids) - n_demo
+    by_task: dict[str, int] = {}
+    for e in ids:
+        parts = e.split("_t", 1)
+        key = parts[1].split("_", 1)[0] if len(parts) > 1 else "?"
+        by_task[key] = by_task.get(key, 0) + 1
 
     print(f"train_dynamics  run_id={run_id}  seed={args.seed}  device={device}")
     print(f"cache={cache.root}")
-    print(f"episodes: {len(ids)} ({n_demo} demo, {n_roll} rollout)")
+    print(
+        f"episodes: {len(ids)} of {len(all_ids)} cached "
+        f"({n_demo} demo, {n_roll} rollout; excluded {len(all_ids) - len(ids)} other)"
+    )
+    print(f"episodes by task: {dict(sorted(by_task.items()))}")
     print(f"reduction={dyn_cfg.reduction} -> R={dyn_cfg.r} tokens/frame")
     print("-" * 78)
 

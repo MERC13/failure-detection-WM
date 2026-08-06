@@ -82,9 +82,14 @@ def main() -> int:
     fp = Fingerprint.build(enc_cfg.hash_payload(), device_kind, renderer, obs_source="replay")
     cache = EncodingCache(runtime_cfg["cache_dir"], fp)
 
+    # Anchored classification, not a substring test: Phase 3's injected failures are named after
+    # the demo they corrupt and an `"_demo_" in e` test would put corrupted episodes into the
+    # goal set. See cfe/data/demos.py:episode_kind.
+    from cfe.data.demos import DEMO, ROLLOUT, episode_kind
+
     ids = cache.episode_ids()
-    demo_ids = [e for e in ids if "_demo_" in e]
-    roll_ids = [e for e in ids if "_rollout_" in e]
+    demo_ids = [e for e in ids if episode_kind(e) == DEMO]
+    roll_ids = [e for e in ids if episode_kind(e) == ROLLOUT]
     if not demo_ids or not roll_ids:
         raise RuntimeError(
             f"need both demos and rollouts in {cache.root}; "

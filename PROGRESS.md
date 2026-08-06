@@ -1229,3 +1229,264 @@ survives a bootstrap CI, on injected failures. `action_ignoring_dynamics` is dec
 `BASELINES` but raises `NotImplementedError` — it *is* the search run against the twin, so
 Phase 3 must implement and register it. §6: every table reports all four baselines or it does
 not ship.
+
+---
+
+## 2026-08-04 (Part C) — Phase 3: failure set, two-stage search, replay; pre-G3 findings
+
+Everything below is settled and reproducible. The G3 gate result itself is in the next section,
+written when the replay stage finished.
+
+### What landed
+
+| Module | What it does |
+|---|---|
+| `cfe/data/inject.py` | §4.4's four causes, gripper-phase detection, action→metres calibration |
+| `cfe/data/failure_set.py` | `results/failure_set/<id>.json`, with the `cause = None` path enforced |
+| `cfe/search/{objective,windows,cem,arms}.py` | §5's two stages, `J(a')`, and arm dispatch |
+| `scripts/build_failure_set.py` | candidates → replay → keep only what actually fails → cache |
+| `scripts/run_search.py` | GPU-cheap; emits `edits.jsonl` for every arm × cell |
+| `scripts/run_replay.py` | the only source of real numbers; resumable per replay |
+| `scripts/verify_g3.py` | the gate, criteria read from `configs/search.yaml` |
+| `scripts/diagnose_replay_noise.py` | determinism, re-seed spread, single-step sensitivity |
+| `configs/search.yaml` | search config **and the six G3 criteria, pre-registered** |
+
+`make g3-check RUN=<id>` added. 234 fast tests pass; `make lint` clean.
+
+The G3 criteria were written and committed **before any search ran and before any replay number
+existed**, the same discipline `configs/dynamics.yaml` used for G2.
+
+### The failure set (task 0)
+
+**70 records: 14 per injected cause plus the 14 natural failures**, from 100 candidates. An
+injection the controller absorbs is not a failure and is reported, not filed as one.
+
+| Cause | kept | absorbed | yield | severity spread of the kept set |
+|---|---|---|---|---|
+| `grasp_offset` | 14 | 12 | 54% | skews to δ = 0.03–0.05 m, y-direction |
+| `mistimed_close` | 14 | 4 | 78% | both signs: −15, +15, −8 |
+| `early_release` | 14 | 28 | 33% | **entirely `steps = 40`** |
+| `wrong_target` | 14 | 0 | 100% | both fractions, both distractors |
+
+Calibration over all 48 demos: **0.0101 / 0.0131 / 0.0121 m per unit action**, per-demo std
+≤ 9e-4, correlation 0.894 / 0.994 / 0.980. The x-axis correlation floor of 0.75 is why
+x-direction `grasp_offset` injections were absorbed more often than y. Realised offsets were
+checked against the *replayed* proprioception, not assumed: `grasp_offset` 0.023–0.070 m,
+`wrong_target` 0.078–0.267 m.
+
+### Surprises
+
+**1. `train_policy.py` and `train_dynamics.py` took every episode in the shared cache.** No
+filter at all. Harmless when written, but Phase 2 added rollouts and Phase 3 adds injected
+failures, so a re-run today would have trained the BC policy on failed episodes — silently, with
+no crash. §4.2 is explicit that failures are "excluded as imitation targets". **No recorded
+result changes**: `p1-bc4` was trained 2026-07-31 12:07 and the first rollout entered the cache
+at 16:47 the same day, verified by timestamp, so the filter restores its composition rather than
+altering it. Same for `p2-dyn`/`p2-dyn-res`, both trained before any injected episode existed.
+
+**2. Injected cache ids contained the substring `_demo_`.** They are named after the demo they
+corrupt, and the first naming produced `..._inject_grasp_offset_demo_1_p2`.
+`probe_representation.py` selects its goal set with `"_demo_" in e`, so injected failures would
+have been loaded as *expert* data. Fixed by renaming to `src<N>` and by replacing every
+substring test with an anchored `cfe/data/demos.py:episode_kind()`. Pinned by a test.
+
+**3. §6's primary variant can bypass the injected fault entirely.** The protocol replaces
+everything after `window_end` with the policy, so a window that *starts before* the corruption
+means the corrupted actions are never executed: the replay becomes "original prefix, then
+policy" and succeeds at the policy's own rate. The first noise-floor run hit this — it placed
+every window at a fixed mid-episode fraction (~t=77) on `early_release` episodes injected at
+89–141, and every arm came out at RSR 1.000. **This does not affect the real run**: measured
+over all 120 search cells, **0% of windows fall entirely before the injection**, 62% fall
+entirely after it, and the median window starts 62 steps past the injection start. The
+diagnostic now stratifies by cause and places its window relative to the injection.
+
+**4. Stage 1 localises some causes and not others.** Aggregate window IoU against ground truth
+is 0.047, but the aggregate hides the mechanism:
+
+| Cause | mean IoU | nonzero | divergence argmax vs truth window |
+|---|---|---|---|
+| `early_release` | 0.094 | 36/36 | **INSIDE**, all episodes |
+| `wrong_target` | 0.094 | 12/24 | 1 of 2 inside |
+| `grasp_offset` | 0.000 | 0/36 | +39 to +69 steps past the end |
+| `mistimed_close` | 0.000 | 0/24 | +50 to +67 steps past the end |
+
+The heuristic finds faults whose latent consequence is *immediate* and misses faults whose
+consequence is *delayed*. An early release changes the scene as it happens; a grasp offset of a
+few centimetres changes almost nothing visible until the grasp misses ~60 steps later. That
+`mistimed_close` is missed despite the gripper being directly observable is not explained and is
+a question for Phase 4.
+
+**5. `action_ignoring_dynamics` is the identity edit in 120/120 cells**, exactly as predicted
+analytically: the twin zeroes actions inside `forward`, so `z_end` does not vary with the
+candidate and `J = const + λ·Σ||a′−a||²` is minimised at the warm start for every λ ≥ 0. Written
+into `cfe/search/arms.py` and pinned by a test *before* the run. A run where this arm proposes
+an edit would mean the twin is seeing actions through some path it should not.
+
+### Verified before the gate
+
+- **Replay is deterministic, byte-exactly.** Same edit replayed twice gives an identical
+  `ReplayResult` including step counts, 3/3 episodes. I5 holds.
+- **The magnitude match holds across the grid**: `search` realised `mean_l2_ee` 0.4201 vs
+  `random_perturb` 0.4136 over 120 cells each, matched per cell by construction, the aggregate
+  gap being clipping at the action bounds. This is SESSION_HANDOFF's obligation 1 and the
+  easiest way to fake a positive result here.
+- **The search does real work**: only 2/120 cells returned the identity edit.
+- §8's named test — CEM recovers a known-good edit on an analytic toy dynamics — passes,
+  including the unique-optimum case at K=1.
+
+### Interpretation notes carried forward
+
+- `wrong_target` is mechanically a large distractor-directed `grasp_offset`. It differs in
+  magnitude and direction, not in kind. With the natural failure set already 100% approach
+  errors, the failure set is more approach-dominated than §4.4's table suggests.
+- `early_release` has no severity diversity: releasing 10 or 20 steps early never breaks the
+  task on `libero_object`, so all 14 kept episodes are the 40-step variant.
+- `no_edit` in the **primary** variant is not §6's replay-bug control — the policy takes over
+  after the window, which never happened to the source episode. Only the **open-loop** variant
+  replays the original sequence and must read 0%. Both are run.
+- `expert_oracle` at stage 1's window is byte-identical to `no_edit` whenever the window misses
+  the injection, which is most of the time. The ground-truth-window arm was added so there is an
+  actual upper bound to compare against.
+
+## 2026-08-05 — **G3: FAIL (4/6)**. The search does not beat `random_perturb`
+
+Run `g3-phase3`, reading `p3-replay-RD` (1060 replays, completed in one attempt, no crashes,
+4.6 h at 16.3 s/replay). Criteria were pre-registered in `configs/search.yaml` before any search
+ran. **Nothing was relaxed.**
+
+### The gate
+
+| Check | | |
+|---|---|---|
+| `beats_random_perturb` | **FAIL** | see below |
+| `no_edit_open_loop_is_zero` | PASS | 0/10 — replay is not broken |
+| `all_baselines_present` | PASS | all four §6 baselines at every cell |
+| `random_perturb_magnitude_matched` | **FAIL** | max diff 0.1176 vs tol 0.02, on 1 of 120 cells |
+| `search_deterministic` | PASS | re-run reproduced a recorded edit bit-exactly (I5) |
+| `config_snapshot_present` | PASS | |
+
+**Criterion 1, at K=8 on 10 injected failures, experiment R (`p2-dyn-res`, model of record):**
+
+| λ | RSR search | RSR `random_perturb` | diff | 95% CI | excludes 0 |
+|---|---|---|---|---|---|
+| 0.01 | 0.00 | 0.00 | +0.000 | [+0.000, +0.000] | no |
+| 0.1 | 0.10 | 0.00 | +0.100 | [+0.000, +0.300] | no |
+| 1.0 | 0.00 | 0.00 | +0.000 | [+0.000, +0.000] | no |
+
+One rescued episode out of ten, at one λ. Not a near miss.
+
+**The magnitude failure is a defect in the pre-registered tolerance, not a finding.** 0.02 was
+too tight for the clipping this project had already documented: on `wrong_target` episodes the
+search's edit sits near the action bounds, so `random_perturb`'s random direction clips and
+realises 0.392 against a requested 0.509. Mean absolute difference over 120 pairs is 0.0065.
+**The bias runs toward the search** — an under-scaled control flatters it — so this cannot
+excuse criterion 1. Changing the tolerance is a gate change and needs sign-off + `CHANGELOG.md`.
+
+### Why it failed: both stages, roughly half each
+
+The `expert_oracle` minus `no_edit` gap at the same window is the **headroom** — how much an
+ideal edit could buy over doing nothing there. Read against what the search actually achieved:
+
+```
+                              K=1   K=2   K=4   K=8
+R/no_edit@ground_truth        1.00  1.00  0.90  0.40
+R/expert_oracle@ground_truth  1.00  1.00  1.00  1.00
+   headroom at the injection  0.00  0.00  0.10  0.60
+
+R/no_edit@stage1_top1         0.10  0.10  0.00  0.00
+R/expert_oracle@stage1_top1   0.10  0.30  0.20  0.30
+   headroom at stage 1s pick  0.00  0.20  0.20  0.30
+
+R/search                      0.00  0.10  0.10  0.00-0.10 (by lambda)
+```
+
+At K=8 the ideal edit is worth **+0.60** at the injection window. Stage 1's window offers
+**+0.30** — so **stage 1 costs about half the available headroom** by placing the window a
+median of +52 steps past the fault. The search then captured **at most a third of what
+remained**. Both stages underperform; neither alone explains the FAIL.
+
+An earlier reading of this table said stage 1 was the whole story, on the grounds that
+`expert_oracle@stage1_top1` was at the floor. That was experiment **D**'s row (0.00 at every K)
+misread as experiment R's. In R the oracle reaches 0.30 at stage 1's own window, so the window
+is not unwinnable and stage 2 leaving that on the table is a real part of the failure. Recorded
+because the corrected reading changes what to do next.
+
+SPEC.md §8 names "search is broken" and "world model is inaccurate" as the two failure modes
+hardest to tell apart. §8's analytic CEM test passes, so the search *machinery* is sound on a
+problem with a known optimum — but that does not establish that it extracts useful deltas from
+this world model at search scale. Separating those two needs the ablation in "Next" below.
+
+### The sharpest finding: the action-ignoring twin selects *better* windows
+
+The twin proposes the identity edit in **240/240** cells across both models, as predicted
+analytically. So its RSR is exactly "no_edit at the twin's window" — and it *beats the search*:
+
+| | median window offset from injection | RSR at K=8 |
+|---|---|---|
+| R/search | +52 | 0.03 |
+| R/`action_ignoring_dynamics` | +47 | **0.10** |
+| D/search | +69 | 0.00 |
+| D/`action_ignoring_dynamics` | +36 | **0.40** |
+
+A model that cannot see actions picks earlier, more recoverable windows than the
+action-conditioned one. The trained model's divergence peaks where the *consequences* of a fault
+appear, which is systematically too late to fix. This inverts what §6 expects the
+`action_ignoring_dynamics` baseline to show and is the strongest single result of the phase.
+
+### Experiment D answers SESSION_HANDOFF's open question — negatively
+
+`p2-dyn` (`residual: false`, more action-sensitive at h96: 0.2678 vs 0.2238) was the flagged
+fallback "if the search is starved of action signal". It did **worse**: `D/search` is 0.00 at
+every K and every λ (0/120 cells) against R's 5/120. Greater action-sensitivity at h96 did not
+translate into better counterfactuals. The residual flag is not the bottleneck.
+
+### Other reported numbers
+
+- Window IoU vs ground truth: mean 0.035, max 0.40 over 480 cells.
+- `cause_top1_accuracy` 0.0 over 240 labelled episodes — as designed; stage 1 predicts no cause
+  tag, so this is reported as measured rather than omitted.
+- Search cost: 232.8 s wall-clock and 2498 dynamics forward passes per counterfactual.
+- Realised edit magnitude: search 0.4134, `random_perturb` 0.4091, `expert_oracle` 0.1004.
+  **The expert's own edit is 4x smaller than the search's** and still wins at the right window.
+
+### A reporting defect in `verify_g3.py` (diagnostic only, no criterion affected)
+
+`search_identity_edit_fraction` reads 0.5104 because it counts every row carrying a `search`
+dict, which includes the action-ignoring arm (identity by construction). The true figures are
+**search 2/120 (R) and 3/120 (D)**; the twin is 120/120 in both. Recorded here so the number in
+`results/runs/g3-phase3/` is not read at face value. No pass/fail depends on it.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).**
+
+### Next
+
+SPEC.md §7: "If not, the honest move is to spend the remaining time on why the world model is
+insufficient."
+
+**The decisive next experiment is a window-oracle ablation.** Re-run stage 2 with the window
+*forced* to the injection point, K=8, all three lambdas, against a magnitude-matched
+`random_perturb` at the same window. Headroom there is +0.60, the largest in the grid, so the
+measurement has room to resolve. It isolates stage 2 from stage 1 completely:
+
+- if the search beats `random_perturb` at the injection window, stage 2 works and the stage-1
+  criterion is worth rebuilding;
+- if it does not, stage 2 is weak too, and SPEC.md §0's stated fallback applies — "a negative
+  result about world-model fidelity ... should be written up as such".
+
+Cost is one short search plus ~60-120 replays, about 30 minutes. **It is oracle-assisted: it
+uses the ground-truth window, which the method would not have at deployment. Its output is a
+diagnostic and can never be reported as an RSR result for C1.** That must be stamped on the run.
+
+Then, in order:
+
+1. Why does divergence rank late windows? It measures where the model *was* surprised, and a
+   fault is only visible once its consequences are. A *predictive* window criterion is the
+   obvious alternative — a change to SPEC.md §5, and the user's call.
+2. Why is `mistimed_close` missed (IoU 0.000) when the gripper is directly observable?
+3. `magnitude_match_tol` needs a decision (see CHANGELOG.md, open item).
+4. `search_identity_edit_fraction` in `verify_g3.py` conflates the search and twin arms; it is a
+   reported diagnostic with no criterion attached, and the true figures are in this entry.
+5. The §4.4 expansion to tasks 1-2 is built and queued but unrun. G4 needs it whatever the
+   method question resolves to.

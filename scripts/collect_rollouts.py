@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-id", default=None)
     p.add_argument("--limit", type=int, default=None, help="only the first N init states")
     p.add_argument("--force", action="store_true", help="re-encode episodes already cached")
+    # See collect_demos.py for why this is an override rather than a config edit.
+    p.add_argument("--task-id", type=int, default=None, help="override encoder.yaml data.task_id")
     return p.parse_args()
 
 
@@ -82,6 +84,10 @@ def main() -> int:
     from scripts.verify_env import load_suite
 
     data_cfg, runtime_cfg = cfg["data"], cfg["runtime"]
+    overrides = {}
+    if args.task_id is not None:
+        overrides["data.task_id"] = {"from": data_cfg["task_id"], "to": int(args.task_id)}
+        data_cfg["task_id"] = int(args.task_id)
     enc_cfg = EncoderConfig.from_dict(cfg["encoder"])
     ev = pol_yaml["eval"]
 
@@ -208,6 +214,7 @@ def main() -> int:
         "suite": data_cfg["suite"],
         "task_id": int(data_cfg["task_id"]),
         "task_name": task.name,
+        "config_overrides": overrides,
         "policy_run": args.policy_run,
         "encoder_cfg_hash": cache.hash,
         "renderer": renderer,

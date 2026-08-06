@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-id", default=None)
     p.add_argument("--limit", type=int, default=None, help="only the first N episodes")
     p.add_argument("--force", action="store_true", help="re-encode episodes already cached")
+    # SPEC.md §4.4 wants >=3 tasks. The alternative to an override is editing
+    # `configs/encoder.yaml:data.task_id` between runs, which would make the file's history the
+    # only record of which task a run covered. The effective value is recorded in the run
+    # summary alongside the snapshot, so a copied config plus `config_overrides` still
+    # determines the run exactly (CLAUDE.md rule 4).
+    p.add_argument("--task-id", type=int, default=None, help="override encoder.yaml data.task_id")
     return p.parse_args()
 
 
@@ -61,6 +67,10 @@ def main() -> int:
     from scripts.verify_env import load_suite
 
     data_cfg, runtime_cfg = cfg["data"], cfg["runtime"]
+    overrides = {}
+    if args.task_id is not None:
+        overrides["data.task_id"] = {"from": data_cfg["task_id"], "to": int(args.task_id)}
+        data_cfg["task_id"] = int(args.task_id)
     enc_cfg = EncoderConfig.from_dict(cfg["encoder"])
 
     suite = load_suite({"suite": data_cfg["suite"]})
@@ -150,6 +160,7 @@ def main() -> int:
         "suite": data_cfg["suite"],
         "task_id": int(data_cfg["task_id"]),
         "task_name": task.name,
+        "config_overrides": overrides,
         "encoder_cfg_hash": cache.hash,
         "renderer": renderer,
         "device": str(encoder.device),

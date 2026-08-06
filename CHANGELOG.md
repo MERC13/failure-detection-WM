@@ -6,6 +6,55 @@ touches `cfe/eval/`.
 
 ---
 
+## 2026-08-05 — G3 criteria pre-registered; `magnitude_match_tol` known too tight (OPEN)
+
+**Added.** `configs/search.yaml:gate`, six criteria for G3, plus `scripts/verify_g3.py` which
+reads them from the config rather than hard-coding them. This is a *new* gate, not a change to
+an existing one, and is logged here so the pre-registration has a dated record.
+
+The criteria were written and committed **before any search was run and before any replay number
+existed**, matching the discipline `configs/dynamics.yaml` used for G2. In summary form:
+
+| # | Criterion | Basis |
+|---|---|---|
+| 1 | `beats_random_perturb` — paired bootstrap CI excludes zero at K=8 **at every λ** | SPEC.md §7; §6: "A method that wins only at one λ has not won" |
+| 2 | open-loop `no_edit` RSR is exactly 0 | §6's replay-bug control |
+| 3 | all four §6 baselines present at every cell | §6: "or it does not ship" |
+| 4 | `random_perturb` realised magnitude matches the search's to `magnitude_match_tol` | SESSION_HANDOFF obligation 1 |
+| 5 | search reproduces a recorded edit bit-exactly | I5 |
+| 6 | config snapshot present | CLAUDE.md rule 4 |
+
+**Result (run `g3-phase3`): FAIL, 4/6.** Criteria 1 and 4 failed. Nothing was relaxed. Full
+numbers in `PROGRESS.md` 2026-08-05.
+
+### Open item: `magnitude_match_tol: 0.02` is too tight, and is NOT yet changed
+
+Criterion 4 failed on **1 of 120 cells** — max absolute difference 0.1176, mean 0.0065. The
+cause is clipping at the action bounds, which this repo had already documented in
+`cfe/eval/metrics.py:random_perturb`: "the *realised* magnitude can come in under
+`magnitude_scale` when the original action is already near a bound". On `wrong_target` episodes
+the search's edit sits near those bounds, so `random_perturb`'s random direction clips and
+realises 0.392 against a requested 0.509. The tolerance was pre-registered without accounting
+for a mechanism described three files away.
+
+**This is recorded as an open defect, not fixed.** Two reasons for leaving it:
+
+1. Changing a gate threshold after seeing it fail is the exact shape CLAUDE.md rule 3 forbids,
+   and this project has already amended a gate after a failure twice. It needs the user's
+   decision, not the assistant's.
+2. **The bias runs toward the search.** An under-scaled `random_perturb` is a *weaker* control,
+   so this defect can only have flattered the treatment arm. It therefore cannot explain or
+   excuse criterion 1's failure, and relaxing it would not manufacture a pass.
+
+If it is changed, the change belongs here with its reasoning and rejected alternatives. Options
+visible now: widen the tolerance to cover measured clipping; make the criterion compare
+*requested* rather than realised scale (rejected on sight — realised is what was replayed);
+or exclude clipped cells and report the count (keeps the tolerance meaningful, adds a rule).
+
+**Prior results affected.** None. G3 is the first gate these criteria have scored.
+
+---
+
 ## 2026-08-04 — G2 `beats_action_ignoring`: magnitude criterion moved from h8 to h96
 
 **Changed.** `configs/dynamics.yaml:gate`. `min_rel_improvement_h8: 0.20` becomes

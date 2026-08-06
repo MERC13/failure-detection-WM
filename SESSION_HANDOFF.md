@@ -3,17 +3,18 @@
 Read this first when starting a session. Then `CLAUDE.md` and `SPEC.md` (SPEC.md is the contract
 and wins any conflict), then `PROGRESS.md` for the full history.
 
-Last updated: 2026-08-04, end of Phase 2.
+Last updated: 2026-08-05, end of Phase 3.
 
 ## Where the project is
 
 | | |
 |---|---|
-| Phase complete | **2** — latent dynamics + G2, and the frozen `cfe/eval/` |
-| Gate state | **G0: PASS. G1: PASS. G2: PASS (5/5)** |
+| Phase complete | **3** — failure set, two-stage search, replay, G3 |
+| Gate state | **G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6)** |
 | Model of record | `p2-dyn-res` (`results/runs/p2-dyn-res/`), gate run `g2-20260804T185522Z` |
-| Next phase | **3** — failure set, two-stage CEM search, `run_replay.py`, the G3 gate |
-| Last commit | `89744da` on `main` |
+| G3 run | `g3-phase3`, reading `p3-replay-RD` (1060 replays) |
+| Next phase | **4** — but read "Where G3 failed" below first; the next move is a decision, not a build |
+| Last commit | `89744da` on `main` (Phase 3 work is uncommitted) |
 
 ## Read this before touching anything
 
@@ -29,27 +30,51 @@ module is. If you hit the block and believe there is a genuine bug: **stop and t
 Do not route around it and do not reimplement the affected logic elsewhere. An approved change
 is logged in `CHANGELOG.md` with its reason and rejected alternatives (CLAUDE.md rule 1).
 
-## What Phase 3 has to build
+## Where G3 failed, and what it points at
 
-`build_failure_set.py` for §4.4's injected causes, the two-stage CEM of §5, `run_replay.py` on
-the frozen eval code, and the **G3 gate**: RSR must exceed `random_perturb` by a margin that
-survives a bootstrap CI, on injected failures.
+**The search does not beat `random_perturb`.** At K=8 on 10 injected failures it rescued one
+episode of ten at one λ and zero elsewhere; `random_perturb` rescued none. The margin does not
+survive the bootstrap at any λ. Full table in `PROGRESS.md` 2026-08-05.
 
-Three obligations the frozen code cannot enforce for you:
+**Both stages lose about half the signal.** Read `expert_oracle` minus `no_edit` at the same
+window as the *headroom* an ideal edit could buy there. At K=8: **+0.60** at the injection
+window, **+0.30** at the window stage 1 actually picked, and the search achieved **0.00-0.10**.
+So stage 1 costs about half the headroom by placing the window a median of +52 steps past the
+fault, and stage 2 then captures at most a third of what remains.
 
-1. **`random_perturb` must be matched on magnitude, not just on budget `K`.** Pass the search's
-   *realised* `edit_magnitude(...)["mean_l2_ee"]` as `magnitude_scale`. This is the single
-   easiest way to fake a positive result in this project — an under-scaled random baseline makes
-   the search look good against nothing. §6 calls it "the baseline that decides whether the
-   project is real". A pre-freeze bug that made this 2.45x too large was caught and fixed; the
-   caller-side half is still on you.
-2. **`action_ignoring_dynamics` is declared in `BASELINES` but raises `NotImplementedError`.**
-   It *is* the search run against the trained twin (the `action_ignoring` key of a
-   `train_dynamics.py` checkpoint). Phase 3 implements and registers it. §6: every table reports
-   all four baselines or it does not ship.
-3. **`expert_oracle` raises `NotApplicable` on natural failures** and that is correct — no demo
-   shares a natural failure's initial state (verified in Phase 1), so there is no upper bound to
-   compute. Do not substitute a nearest-neighbour demo. Report the gap.
+SPEC.md §8 warns that "search is broken" and "world model is inaccurate" are the two failure
+modes you will spend the most time confusing. §8's analytic CEM test passes, so the machinery is
+sound on a problem with a known optimum — but that does not show it extracts useful deltas from
+*this* model at search scale. **The window-oracle ablation in PROGRESS.md's "Next" separates
+them and is the first thing to run** (~30 min; strictly diagnostic, oracle-assisted, never
+reportable as an RSR result).
+
+**The action-ignoring twin selects better windows than the trained model.** It proposes the
+identity edit in 240/240 cells (analytically forced — its `z_end` does not vary with the
+candidate), so its RSR *is* "no_edit at its own window" — and it beats the search: 0.10 vs 0.03
+at K=8 in experiment R, and 0.40 vs 0.00 in experiment D. A model that cannot see actions picks
+earlier, more recoverable windows. This inverts what §6 expects of that baseline.
+
+**`residual: false` is not the fix.** `p2-dyn` was the flagged fallback if the search turned out
+starved of action signal. It scored 0.00 at every K and λ (0/120 cells) against R's 5/120. More
+action-sensitivity at h96 did not produce better counterfactuals.
+
+Three decisions are open and are the user's, not the assistant's:
+
+1. **The `magnitude_match_tol` of 0.02 is too tight** for clipping this project had already
+   documented — it failed on 1 of 120 cells (max diff 0.1176, mean 0.0065). The bias runs
+   *toward* the search, so it cannot excuse criterion 1. Changing it is a gate change:
+   `CHANGELOG.md` with reasoning and rejected alternatives.
+2. **Whether stage 1's window criterion should change.** Divergence is retrospective — it ranks
+   where the model was surprised, and a fault is only visible once its consequences are. A
+   predictive criterion is the obvious alternative and is a change to SPEC.md §5.
+3. **Whether to run the §4.4 expansion** (built, queued, unrun, ~4 h) or spend that compute on a
+   stage-1 diagnostic instead.
+
+The three obligations Phase 2 handed over were all discharged: `random_perturb` is matched on
+realised magnitude per cell (verified as a gate criterion), `action_ignoring_dynamics` is
+implemented in `cfe/search/arms.py` without mutating the frozen module, and `expert_oracle`
+still raises `NotApplicable` on natural failures.
 
 ## Phase 2 results worth carrying forward
 
@@ -79,9 +104,11 @@ rest.
 | What | Where | Size |
 |---|---|---|
 | `libero_object` demos | `~/data/libero/` | 7.0 GB |
-| Encoding cache (98 episodes) | `~/data/cfe_cache/a005df8c057942c3/` | 7.0 GB |
+| Encoding cache (154 episodes) | `~/data/cfe_cache/a005df8c057942c3/` | 9.7 GB |
 | LIBERO simulation assets | `~/.cache/libero/assets` | 409 MB |
 | DINOv2 weights | `~/.cache/huggingface` | 334 MB |
+| Injected failure episodes (56) | same cache dir | 3.5 GB |
+| Failure set records (70) | `results/failure_set/` | small, but gitignored |
 | LIBERO global config | `~/.libero/config.yaml` | tiny, but see trap 3 |
 | venv | `~/.venvs/failure-detection-WM` | — |
 
@@ -129,3 +156,9 @@ Sample `clocks_throttle_reasons.active` instead.
 - Every result writes a config snapshot to `results/runs/<run_id>/` beside `metrics.jsonl`.
 - **`cfe/eval/` is frozen** — see the top of this file. The hooks will stop you.
 - One phase per session; append to `PROGRESS.md` at the end of each.
+- **The shared encoding cache now holds three kinds of episode** — demos, BC rollouts, and
+  injected failures. Select on `cfe/data/demos.py:episode_kind()`, never on a substring: an
+  injected id is named after the demo it corrupts, and an `"_demo_" in cid` test classifies it
+  as expert data. `train_policy.py` (demos, this task only), `train_dynamics.py` (demos +
+  rollouts) and `probe_representation.py` all filter explicitly now; they did not before Phase 3
+  and an unfiltered re-run would have trained on failures.

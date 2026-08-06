@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from pathlib import Path
 
 import h5py
@@ -100,9 +101,31 @@ def cache_episode_id(suite: str, task_id: int, episode_id: str) -> str:
     collision is a matter of when, not if. Renaming later means migrating tens of GB; the
     prefix costs nothing now.
 
-    Rollout episodes use the same namespace with a `rollout_<init_idx>` local id.
+    Rollout episodes use the same namespace with a `rollout_<init_idx>` local id, and Phase 3's
+    injected failures with an `inject_<cause>_src<N>_p<i>` one.
     """
     return f"{suite}_t{int(task_id)}_{episode_id}"
+
+
+#: The three kinds of episode that share the flat cache: expert demos, BC rollouts, and Phase 3's
+#: injected failures. Consumers select on these rather than on substrings — see `episode_kind`.
+DEMO, ROLLOUT, INJECT = "demo", "rollout", "inject"
+
+_KIND_RE = re.compile(r"_t\d+_([a-z]+)_")
+
+
+def episode_kind(cache_id: str) -> str:
+    """Which kind of episode a cache id names: `demo`, `rollout`, `inject`, or `unknown`.
+
+    Anchored on the `_t<task>_<kind>_` segment rather than tested with `in`. An injected
+    failure is named after the demo it corrupts — `libero_object_t0_inject_grasp_offset_src1_p2`
+    — and an earlier version embedded `demo_1` there, so `"_demo_" in cid` was true for injected
+    episodes and they would have been loaded as expert data by `train_dynamics.py` and
+    `probe_representation.py`. Caught before any of them reached a training run; the local id no
+    longer contains `demo`, and this function means the classification does not depend on that.
+    """
+    m = _KIND_RE.search(cache_id)
+    return m.group(1) if m else "unknown"
 
 
 def read_episode(path: str | Path, episode_id: str) -> dict:

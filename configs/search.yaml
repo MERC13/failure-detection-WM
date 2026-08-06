@@ -1,0 +1,187 @@
+# Counterfactual search (SPEC.md §5) and the G3 gate (SPEC.md §7).
+#
+# The `gate:` block at the bottom was written and committed BEFORE any search was run and
+# before any replay number existed, the same way `configs/dynamics.yaml:gate` was written
+# before the dynamics model was trained. That is the entire point: picking a bar after seeing
+# the number is the failure CLAUDE.md rule 3 describes, and G1 and G2 have each already been
+# amended once after a gate failed. If any of these criteria change, the change goes in
+# CHANGELOG.md with its reasoning and its rejected alternatives, decided by the user.
+#
+# SPEC.md §7 on G3: "If not, the honest move is to spend the remaining time on why the world
+# model is insufficient. That is a real result and a better project than a fabricated
+# positive." A FAIL here is an outcome, not a problem to engineer around.
+
+encoder_config: configs/encoder.yaml
+env_config: configs/env.yaml
+dynamics_config: configs/dynamics.yaml
+policy_config: configs/policy.yaml
+
+# Which trained checkpoints the search runs against. Two experiments, fixed in advance so the
+# choice cannot be made after seeing which one wins.
+#
+#   R  p2-dyn-res  residual: true   — the MODEL OF RECORD. Passes G2 5/5. This is the
+#                                     experiment the gate is scored on.
+#   D  p2-dyn      residual: false  — more action-sensitive at h96 (0.2678 vs 0.2238) but FAILs
+#                                     beats_copy_last_latent, so it is not the model of record.
+#                                     Reported as a secondary comparison because SESSION_HANDOFF
+#                                     flags "if the search is starved of action signal, this
+#                                     flag is the first thing to revisit".
+experiments:
+  R:
+    dyn_run: p2-dyn-res
+    gated: true
+  D:
+    dyn_run: p2-dyn
+    gated: false
+
+# The BC policy that takes over at step 4 of the replay protocol, per task.
+policy_runs:
+  0: p1-bc4
+
+search:
+  # -- Stage 1: choose the edit window (SPEC.md §5) --------------------------------------
+  #
+  # Per-step divergence between the model's prediction and the observed latents is computed
+  # once per episode, then windows of each budget K are scored by their mean. One pass serves
+  # every K, and the ranking a window gets does not depend on which K it was scored for.
+  windows:
+    stride: 4 # candidate window starts, in steps
+    top_m: 3 # keep this many candidates per (episode, K) for stage 2
+    # Score a window by the model's mean error over the next H frames from each of its steps.
+    # Mean rather than the one-step error: one-step error is dominated by the copy-last-latent
+    # regime, where G2 measured action-conditioning to be weakest (rel 0.035 at h8).
+    score_horizon: 8
+    # Exhaustive enumeration as a correctness check on the stride heuristic (SPEC.md §5:
+    # "also support exhaustive windows on short episodes"). Run on this many episodes.
+    n_exhaustive_check: 5
+
+  # -- Stage 2: CEM over deltas within the window (SPEC.md §5) ---------------------------
+  cem:
+    population: 64
+    elite_frac: 0.125 # 8 elites
+    n_iters: 5
+    # Initial per-dimension std of the delta, in action units. 0.15 is ~0.7x the std of the
+    # translation dims in the demos (0.22-0.51) and ~3x the rotation dims (0.016-0.062), so the
+    # search can move translation meaningfully without saturating rotation.
+    init_std: 0.15
+    std_floor: 0.01 # stop the distribution collapsing to a point before the last iteration
+    # The gripper is searched as a BINARY FLIP with a per-step probability refit from the
+    # elites, never as a continuous delta. CLAUDE.md: dim 6 is not continuous in the same
+    # sense as dims 0-5.
+    search_gripper: true
+    init_flip_prob: 0.1
+
+  # -- Objective ------------------------------------------------------------------------
+  #
+  # J(a') = D(z_end(a'), z_goal) + lam * sum_t ||a'_t - a_t||^2
+  #
+  # The penalty is over the full 7-vector, as SPEC.md §5 writes it. The *reported* edit
+  # magnitude excludes the gripper (cfe/eval/metrics.py). That divergence between the objective
+  # and the metric is deliberate and flagged at both sites.
+  objective:
+    # SPEC.md §6/I4: never a single tuned number. Both grids are swept for every arm.
+    budgets: [1, 2, 4, 8] # K — BUDGET_GRID in cfe/eval/metrics.py
+    lambdas: [0.01, 0.1, 1.0]
+    # z_end is rolled from the context preceding the window, through the edited window, then
+    # with the original actions to the end of the episode — 100+ steps, the regime the G2
+    # magnitude criterion was moved to h96 to measure.
+    rollout_to_episode_end: true
+
+  # eps for `edit_sparsity`, swept and reported at each value rather than fixed at a
+  # favourable one (cfe/eval/metrics.py: "eps is a swept config field, never tuned").
+  sparsity_eps: [0.001, 0.01, 0.1]
+
+replay:
+  # §6: "Every table reports these or it does not ship." `search` is the treatment; the other
+  # four are cfe/eval/metrics.py:BASELINES.
+  arms: [search, random_perturb, no_edit, expert_oracle, action_ignoring_dynamics]
+
+  # Primary only for the K x lambda grid, by decision on 2026-08-04: the open-loop secondary
+  # would double a ~7.8 h run on a machine with unresolved hard power-offs. Deferred to G4 and
+  # reported as deferred.
+  #
+  # EXCEPT no_edit, which runs in BOTH variants, because they measure different things:
+  #   - open_loop  = the original action sequence, exactly. Must be 0%. This is §6's
+  #                  replay-bug detector and dropping it would remove the only control that
+  #                  catches a broken protocol.
+  #   - primary    = original actions, then the BC policy takes over — which never happened to
+  #                  the source demo. Informative ("would the policy have rescued this
+  #                  anyway?") but NOT the replay-bug control.
+  variants: [primary]
+  both_variants_for: [no_edit]
+
+  # G3 is "end-to-end skeleton on one task, 10 failures" (SPEC.md §7). Drawn round-robin over
+  # causes from the sorted failure set so the selection is deterministic and not
+  # cause-imbalanced.
+  g3_n_failures: 10
+  g3_task_id: 0
+  g3_stratify_by_cause: true
+
+# Injection parameter grids (SPEC.md §4.4). Candidates are generated in this order and the
+# first `per_cause_per_task` that ACTUALLY FAIL on replay are kept. Candidates that still
+# succeed are counted and reported, never silently dropped.
+inject:
+  per_cause_per_task: 14 # 14 x 3 tasks = 42 per cause, clearing §4.4's ">=40 per injected cause"
+  approach_window_steps: 20 # steps before the grasp over which an xy offset is spread
+
+  grasp_offset:
+    # Metres, converted to action units through a calibration measured from that task's own
+    # demos. Directions are unit vectors in the table plane.
+    delta_m: [0.02, 0.03, 0.05]
+    directions: [[1, 0], [-1, 0], [0, 1], [0, -1]]
+
+  wrong_target:
+    # Fraction of the way from the target object to a distractor. 1.0 lands on the distractor.
+    fractions: [0.6, 1.0]
+    # How many distinct distractors to try per demo, taken in sorted key order.
+    n_distractors: 2
+
+  mistimed_close:
+    shifts: [-15, -8, 8, 15] # negative = close early, positive = close late
+
+  early_release:
+    steps: [10, 20, 40]
+
+# ---------------------------------------------------------------------------------------
+# G3 gate — PRE-REGISTERED 2026-08-04, before any search or replay had been run.
+# ---------------------------------------------------------------------------------------
+gate:
+  # 1. SPEC.md §7: "RSR must exceed random_perturb by a margin that survives a bootstrap CI,
+  #    on injected failures." Scored on experiment R (the model of record), primary variant,
+  #    injected failures only, via cfe/eval/metrics.py:bootstrap_rsr_difference.
+  #
+  #    Required at the LARGEST budget and at EVERY lambda, because SPEC.md §6 says outright:
+  #    "A method that wins only at one λ has not won." Requiring it at a single favourable
+  #    lambda would be exactly the tuned number I4 forbids.
+  beats_random_perturb:
+    budget_k: 8
+    require_all_lambdas: true
+    n_bootstrap: 10000
+    alpha: 0.05
+
+  # 2. §6: no_edit "should be ~0% by construction; catches replay bugs". In the OPEN-LOOP
+  #    variant it replays the original action sequence of an episode already measured to fail,
+  #    so anything above zero means the protocol is broken. Hard stop, not a tolerance to widen.
+  max_no_edit_open_loop_rsr: 0.0
+
+  # 3. §6: "Every table reports these or it does not ship." Checked against the four names in
+  #    cfe/eval/metrics.py:BASELINES, at every cell of the grid.
+  require_all_baselines: true
+
+  # 4. SESSION_HANDOFF obligation 1: random_perturb must be matched on MAGNITUDE, not just on
+  #    budget K. Its realised mean_l2_ee must equal the search's for the same cell. The
+  #    tolerance is not zero only because both arms clip at the action bounds, which can pull
+  #    a realised magnitude below the requested one; that case is recorded per cell.
+  #    "This is the single easiest way to fake a positive result in this project."
+  magnitude_match_tol: 0.02
+
+  # 5. I5. Re-running the search at the same seed must reproduce bit-identical edits.
+  require_search_deterministic: true
+
+  # 6. CLAUDE.md rule 4: a number without its config is an orphan.
+  require_config_snapshot: true
+
+  # Reported, NOT gated. If expert_oracle is ~0 everywhere then no edit of any budget rescues
+  # these episodes, and criterion 1 is comparing two ways of failing. That has to be said out
+  # loud rather than left for a reader to notice, so the gate prints it as a warning.
+  warn_expert_oracle_rsr_below: 0.10

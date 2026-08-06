@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-id", default=None)
     p.add_argument("--n-rollouts", type=int, default=None, help="override eval rollout count")
     p.add_argument("--skip-eval", action="store_true", help="train only; no sim rollouts")
+    # See collect_demos.py for why this is an override rather than a config edit. A policy is
+    # single-task, so the task it was trained on is stored in the checkpoint too — deploying a
+    # task-1 policy on task 0 would produce plausible garbage rather than an error.
+    p.add_argument("--task-id", type=int, default=None, help="override encoder.yaml data.task_id")
     return p.parse_args()
 
 
@@ -71,6 +75,10 @@ def main() -> int:
     pol_cfg = PolicyConfig.from_dict(cfg["policy"])
     tr, ev = cfg["train"], cfg["eval"]
     data_cfg, runtime_cfg = enc_yaml["data"], enc_yaml["runtime"]
+    overrides = {}
+    if args.task_id is not None:
+        overrides["data.task_id"] = {"from": data_cfg["task_id"], "to": int(args.task_id)}
+        data_cfg["task_id"] = int(args.task_id)
     enc_cfg = EncoderConfig.from_dict(enc_yaml["encoder"])
 
     suite = load_suite({"suite": data_cfg["suite"]})
@@ -92,10 +100,28 @@ def main() -> int:
             enc_cfg.hash_payload(), device, renderer=renderer, obs_source="replay"
         )
         cache = EncodingCache(runtime_cfg["cache_dir"], fingerprint)
-        episode_ids = cache.episode_ids()
+        # DEMOS ONLY, AND ONLY THIS TASK'S.
+        #
+        # The cache is flat and shared across tasks and episode sources, and it has grown three
+        # kinds of episode since this script last ran: task-0 demos, BC rollouts (Phase 2), and
+        # injected failures (Phase 3). `cache.episode_ids()` returns all of them. SPEC.md §4.2 is
+        # explicit that failures are "excluded as imitation targets", so an unfiltered re-run
+        # would train the BC policy on episodes that failed — silently, and with no crash to
+        # notice.
+        #
+        # This does not change any recorded result. `p1-bc4` was trained 2026-07-31 12:07 and the
+        # first rollout entered the cache at 16:47 the same day, so it saw demos only; the filter
+        # restores the behaviour that produced it rather than altering it. Verified by timestamp,
+        # not assumed.
+        prefix = f"{data_cfg['suite']}_t{int(data_cfg['task_id'])}_demo_"
+        all_ids = cache.episode_ids()
+        episode_ids = [e for e in all_ids if e.startswith(prefix)]
         if not episode_ids:
-            raise RuntimeError(f"cache {cache.root} is empty — run scripts/collect_demos.py first")
-        print(f"cache: {cache.root}  ({len(episode_ids)} episodes)")
+            raise RuntimeError(
+                f"cache {cache.root} holds no demos matching {prefix!r} "
+                f"({len(all_ids)} episodes total) — run scripts/collect_demos.py first"
+            )
+        print(f"cache: {cache.root}  ({len(episode_ids)} demos of {len(all_ids)} cached episodes)")
 
         # Split by EPISODE, not by sample: consecutive frames within an episode are near
         # duplicates, so a per-sample split would leak the validation set into training.
@@ -223,7 +249,10 @@ def main() -> int:
     summary = {
         "run_id": run_id,
         "seed": args.seed,
+        "suite": data_cfg["suite"],
+        "task_id": int(data_cfg["task_id"]),
         "task_name": task.name,
+        "config_overrides": overrides,
         "encoder_cfg_hash": cache.hash,
         "renderer": renderer,
         "device": str(device),
@@ -257,6 +286,12 @@ def main() -> int:
             "normalizer": norm.state_dict(),
             "policy_config": cfg["policy"],
             "input_dim": int(xtr.shape[1]),
+            # A BC policy is single-task. `run_replay.py` maps task -> policy run, and without
+            # this the only record of which task a checkpoint belongs to is its run_id.
+            "suite": data_cfg["suite"],
+            "task_id": int(data_cfg["task_id"]),
+            "task_name": task.name,
+            "train_episode_ids": train_ids,
         },
         run_dir / "policy.pt",
     )

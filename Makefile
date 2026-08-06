@@ -7,7 +7,7 @@ PY   := $(VENV)/bin/python
 # WSLg's libd3d12 + mesa d3d12_dri; osmesa is the software fallback.
 export MUJOCO_GL ?= egl
 
-.PHONY: env-check g1-check g2-check test test-slow lint
+.PHONY: env-check g1-check g2-check g3-check test test-slow lint
 
 env-check:
 	$(PY) scripts/verify_env.py --config configs/env.yaml
@@ -23,6 +23,11 @@ g1-check:
 g2-check:
 	$(PY) scripts/verify_g2.py --config configs/dynamics.yaml \
 		--dyn-run $(DYN_RUN) --probe-run $(PROBE_RUN)
+
+# RUN is the run_replay.py run_id whose replayed outcomes the gate reads. The gate never
+# replays anything itself: it scores what the simulator already recorded.
+g3-check:
+	$(PY) scripts/verify_g3.py --config configs/search.yaml --run $(RUN)
 
 test:
 	$(PY) -m pytest tests/ -v -m "not slow"

@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--run-id", default=None)
     p.add_argument("--n-replay-checks", type=int, default=3)
+    # SPEC.md §4.4 wants >=3 tasks, and G1 is per task. See collect_demos.py for why this is an
+    # override rather than a config edit; the effective value is printed and recorded.
+    p.add_argument("--task-id", type=int, default=None, help="override encoder.yaml data.task_id")
     return p.parse_args()
 
 
@@ -324,12 +327,16 @@ def main() -> int:
     from cfe.encoders.cache import EncodingCache, Fingerprint
 
     data_cfg, runtime_cfg = cfg["data"], cfg["runtime"]
+    overrides = {}
+    if args.task_id is not None:
+        overrides["data.task_id"] = {"from": data_cfg["task_id"], "to": int(args.task_id)}
+        data_cfg["task_id"] = int(args.task_id)
     enc_cfg = EncoderConfig.from_dict(cfg["encoder"])
     bounds = tuple(float(x) for x in pol_cfg["eval"]["success_bounds"])
     min_failures = int(pol_cfg["eval"]["min_failures"])
 
     print(f"G1 gate  run_id={run_id}  seed={args.seed}  MUJOCO_GL={os.environ['MUJOCO_GL']}")
-    print(f"config={args.config}")
+    print(f"config={args.config}  task_id={data_cfg['task_id']}  overrides={overrides}")
     print("-" * 78)
 
     suite = load_suite({"suite": data_cfg["suite"]})
