@@ -20,7 +20,7 @@ existed**, matching the discipline `configs/dynamics.yaml` used for G2. In summa
 | 1 | `beats_random_perturb` — paired bootstrap CI excludes zero at K=8 **at every λ** | SPEC.md §7; §6: "A method that wins only at one λ has not won" |
 | 2 | open-loop `no_edit` RSR is exactly 0 | §6's replay-bug control |
 | 3 | all four §6 baselines present at every cell | §6: "or it does not ship" |
-| 4 | `random_perturb` realised magnitude matches the search's to `magnitude_match_tol` | SESSION_HANDOFF obligation 1 |
+| 4 | `random_perturb` realised magnitude matches the search's to `magnitude_match_tol` | CLAUDE.md's magnitude-matching obligation |
 | 5 | search reproduces a recorded edit bit-exactly | I5 |
 | 6 | config snapshot present | CLAUDE.md rule 4 |
 

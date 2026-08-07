@@ -248,7 +248,7 @@ def check_all_baselines_present(replays: list[dict], cfg: dict, gate: dict) -> R
 def check_magnitude_match(rows: list[dict], gate: dict) -> Result:
     """Criterion 4. `random_perturb` matched on magnitude, not only on budget K.
 
-    SESSION_HANDOFF: "This is the single easiest way to fake a positive result in this project —
+    CLAUDE.md: "This is the single easiest way to fake a positive result in this project —
     an under-scaled random baseline makes the search look good against nothing."
     """
     tol = float(gate["magnitude_match_tol"])

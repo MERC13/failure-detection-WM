@@ -1,6 +1,6 @@
 """Arm dispatch and the magnitude-matching obligation (SPEC.md §6).
 
-SESSION_HANDOFF names magnitude matching as "the single easiest way to fake a positive result
+CLAUDE.md names magnitude matching as "the single easiest way to fake a positive result
 in this project": `random_perturb` matched only on budget `K` and left free on perturbation size
 is weak by construction, and the search then wins against nothing. The frozen module cannot
 enforce that the caller passes the search's *realised* magnitude — these tests are the

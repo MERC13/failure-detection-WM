@@ -3,6 +3,10 @@
 Research codebase. The contract is `@SPEC.md` — read it before writing code. Where this file
 and SPEC.md conflict, SPEC.md wins and you should tell me about the conflict.
 
+Read this file first, then `SPEC.md`, then `PROGRESS.md` for the full history. `CHANGELOG.md`
+records every change to a metric, threshold, gate, or the replay protocol. `WORKFLOW.md` is the
+prompting playbook and holds the unrun P4-P6 phase prompts.
+
 ## What this project is
 
 Search a learned world model for the minimal edit to a failed robot episode's actions that
@@ -171,6 +175,55 @@ replay bugs. If a table is missing them it is not finished, even if I forgot to 
   confident, plausible, wrong numbers that were caught only because they contradicted a
   separate diagnostic. When you add a measurement, measure its noise floor first and check it
   against a signal you already trust before reporting anything from it.
+
+## What is not in the repo
+
+`results/` is gitignored except `results/figures/` (SPEC.md §3). `setup_env.sh` recreates the
+rest. Run directories under `results/runs/` are the provenance for every number in `PROGRESS.md`
+and `CHANGELOG.md` — **do not delete them to save disk.** CHANGELOG.md 2026-08-04 says of two
+failed G2 runs "both stand exactly as recorded"; deleting them destroys exactly that.
+
+| What | Where | Size |
+|---|---|---|
+| `libero_object` demos | `~/data/libero/` | 7.0 GB |
+| Encoding cache | `~/data/cfe_cache/a005df8c057942c3/` | ~10 GB, 154+ episodes |
+| Failure set records | `results/failure_set/` | small, gitignored |
+| LIBERO simulation assets | `~/.cache/libero/assets` | 409 MB |
+| DINOv2 weights | `~/.cache/huggingface` | 334 MB |
+| LIBERO global config | `~/.libero/config.yaml` | tiny, but see trap 3 |
+| venv | `~/.venvs/failure-detection-WM` | — |
+
+Models of record: BC policy `p1-bc4`; dynamics `p2-dyn-res` (G2 run `g2-20260804T185522Z`);
+G3 run `g3-phase3` reading `p3-replay-RD`.
+
+## Five install traps that cost real time
+
+1. **`mujoco` must stay `<= 3.3.7`.** robosuite declares it with *no upper bound*, so a fresh
+   resolve grabs the latest. `MjData.qM` became `MjData.M` in 3.4.0 and the OSC controller dies
+   on the first env construction. A plain `pip install -U` reintroduces this.
+2. **`robosuite` must stay `1.4.x`.** 1.5 removed `SingleArmEnv`, which LIBERO imports, so
+   `import libero` breaks outright.
+3. **Importing `libero` runs `input()`** if `~/.libero/config.yaml` is absent — it blocks
+   interactively and dies with `EOFError` under any non-interactive runner.
+4. **Demo image keys != live env image keys.** Demos store `agentview_rgb`; the live env returns
+   `agentview_image`. A silent-wrong-answer trap, not a crash.
+5. **`configs/encoder.yaml` stores `cache_dir` with a literal `~`.** Python's `glob` does not
+   expand it; use `os.path.expanduser`. This silently returns zero files.
+
+## Unresolved: the machine hard power-offs
+
+The box has hard-rebooted six or more times — Windows Kernel-Power Event 41, **no bugcheck**, no
+WHEA, no TDR, on AC. **Not thermal and not OOM**, both measured: 10 min of sustained GPU load
+held 73-74 C; across a 97-minute training run WSL `MemAvailable` never fell below 3671 MiB. The
+signature points at power delivery; the battery is 15.5% worn and the GPU transient-spikes to
+110 W against a 90 W cap. Unconfirmed.
+
+Consequences for how you run things: long jobs must be **resumable** (`run_replay.py` fsyncs
+after every replay and skips completed cells) and should be launched with `setsid` — a session
+teardown killed one training run outright. Logs go to `~/runlogs/`, **not** `/tmp`, which WSL
+clears on every boot. `~/run_with_telemetry.py` wraps a command with crash-survivable logging.
+`nvidia-smi`'s thermal-slowdown *counters* read 0 us on this die and are unreliable; sample
+`clocks_throttle_reasons.active` instead.
 
 ## Where the project actually stands (read before proposing a fix)
 

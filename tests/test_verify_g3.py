@@ -195,7 +195,7 @@ def test_matched_magnitudes_pass():
 
 
 def test_an_under_scaled_random_baseline_is_caught():
-    """SESSION_HANDOFF: the single easiest way to fake a positive result in this project."""
+    """CLAUDE.md: the single easiest way to fake a positive result in this project."""
     rows = [
         _row(arm="search", realised_mean_l2_ee=0.50),
         _row(arm="random_perturb", realised_mean_l2_ee=0.05),

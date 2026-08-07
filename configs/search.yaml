@@ -23,7 +23,7 @@ policy_config: configs/policy.yaml
 #                                     experiment the gate is scored on.
 #   D  p2-dyn      residual: false  — more action-sensitive at h96 (0.2678 vs 0.2238) but FAILs
 #                                     beats_copy_last_latent, so it is not the model of record.
-#                                     Reported as a secondary comparison because SESSION_HANDOFF
+#                                     Reported as a secondary comparison because CLAUDE.md
 #                                     flags "if the search is starved of action signal, this
 #                                     flag is the first thing to revisit".
 experiments:
@@ -168,7 +168,7 @@ gate:
   #    cfe/eval/metrics.py:BASELINES, at every cell of the grid.
   require_all_baselines: true
 
-  # 4. SESSION_HANDOFF obligation 1: random_perturb must be matched on MAGNITUDE, not just on
+  # 4. The magnitude-matching obligation (CLAUDE.md): random_perturb must be matched on MAGNITUDE, not just on
   #    budget K. Its realised mean_l2_ee must equal the search's for the same cell. The
   #    tolerance is not zero only because both arms clip at the action bounds, which can pull
   #    a realised magnitude below the requested one; that case is recorded per cell.

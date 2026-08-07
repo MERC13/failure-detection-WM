@@ -8,7 +8,7 @@ detects nothing.
 
 **Resumable, per replay.** One JSON line is appended and flushed after every episode, and a
 restart skips cells already present. The machine this runs on has hard-powered-off six or more
-times with no bugcheck (SESSION_HANDOFF), and a ~5 h run that has to start over on each of
+times with no bugcheck (CLAUDE.md), and a ~5 h run that has to start over on each of
 those never finishes. A crash costs one replay.
 
 The BC policy supplies step 4 of the primary variant. It is loaded here and handed to the
