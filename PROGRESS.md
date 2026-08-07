@@ -1596,3 +1596,68 @@ first step recorded there is the **ceiling test**: can a classifier separate cle
 per timestep on the 56 matched pairs, and does it localise the known fault window? Pure GPU on
 cached latents. If it cannot, no window-selection method can work and the negative result is
 much stronger.
+
+---
+
+## 2026-08-07 — hard power-off #7; SPEC §4.2 and §5 amended; both jobs restarted serialised
+
+### The crash
+
+The box hard power-offed again at ~11:36, seventh or more occurrence, same signature as every
+previous one (Kernel-Power 41, no bugcheck, no WHEA, no TDR, on AC). It happened under
+**concurrent GPU training + CPU simulation**, which is a load pattern the earlier crashes also
+shared, but nothing here confirms causation — the diagnosis in `CLAUDE.md` stays "unconfirmed,
+signature points at power delivery".
+
+**Lost:** `p35-ar8` (dynamics training, ~1 h in, no run directory — `train_dynamics.py` writes
+its artifacts only at the end) and task 1's BC policy training. Also the expansion driver
+script, which had been written into `/tmp`; **WSL clears `/tmp` on every boot**, which
+`CLAUDE.md` already warns about for logs and is now true for scripts too. Rewritten to
+`~/p35_queue.sh`.
+
+**Survived, verified by inspection rather than assumption:** every committed artifact,
+`p3-bank` / `p3-bank-replay` (336 replays), `p3-oracle*`, `p3-oracle56*`, `p35-seed{1,2,3}`,
+the `p35-objq-*` screens, the 70-record task-0 failure set, and 46 of task 1's demos in the
+encoding cache. Cache census after the crash: task 0 = 48 demo / 50 rollout / 56 inject,
+task 1 = 46 demo, task 2 = none.
+
+### The restart is serialised, and that costs almost nothing
+
+`~/p35_queue.sh` runs `p35-ar8` to completion and *then* the §4.4 expansion, under `setsid`.
+The user had approved running them in parallel, and the reason for changing that is arithmetic
+rather than caution alone: `CLAUDE.md` records that a GPU job alongside sim roughly doubles a
+replay (16 s → 31 s), so the parallel ordering stretches the sim by about as much as running it
+second does — while exposing two non-checkpointing jobs to a single crash instead of one.
+
+**No resume path was added to `train_dynamics.py`.** It was considered and rejected: resuming
+mid-training and remaining bit-reproducible means persisting optimizer state plus both RNG
+streams, and rule 5 makes a subtly wrong resume worse than a 3.5 h re-run — especially for a
+checkpoint whose only purpose is to be *compared* against `p2-dyn-res` and the three seeds.
+
+### SPEC amendments landed (both pre-approved by the user)
+
+- **§4.2** — the autoregressive rollout loss is `train.ar_chunks` chunks, configurable, rather
+  than the literal "2 steps". Motivated by the mismatch between 16-step training and the 100+
+  step rollout §5 actually performs.
+- **§5** — `D` may be an ensemble mean of member distances **standardised across the candidate
+  population**, which makes it a ranking quantity and never a reportable number.
+
+Both are in `CHANGELOG.md` with their reasoning and their rejected alternatives (`ar_chunks:12`,
+shrinking the batch, raw averaging, mixing model families). **No threshold, gate, or protocol
+moved, and no prior result is affected** — `p35-ar8` is untrained and the ensemble has so far
+been used only in a no-simulator ranking diagnostic. **The G3 FAIL stands as recorded.**
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged; nothing here re-ran a gate.
+
+### Next
+
+1. `p35-ar8` finishes (~3.9 h at the measured 117 s/epoch × 4 × 30 epochs), then it is
+   **screened for free** against `p3-bank-replay`, single and inside the seed ensemble. If it
+   does not materially beat 0.6680 it never earns a twin, never earns G2, and never earns sim.
+2. The expansion follows: tasks 1 and 2 through demos → BC → **G1** → rollouts → failure set. A
+   task whose policy fails G1 is excluded and reported as excluded.
+3. Still open for the user: `magnitude_match_tol`; whether SPEC §5's window criterion changes;
+   and whether to run the **ceiling test** (can a classifier localise the fault at all from
+   these latents, on the 56 matched clean/corrupted pairs) before any further method work.

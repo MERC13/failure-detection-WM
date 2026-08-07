@@ -6,6 +6,63 @@ touches `cfe/eval/`.
 
 ---
 
+## 2026-08-07 — SPEC §4.2 rollout-loss horizon and §5 `D` are amended (approved by the user)
+
+**Changed.** Two SPEC sections, both approved before any of the work below was run.
+
+### §4.2 — the autoregressive rollout loss is a knob, not the literal "2 steps"
+
+`train.ar_chunks` is now an explicit config field and a `train_dynamics.py --ar-chunks`
+override, and a horizon-matched model (`ar_chunks: 8`, 64 steps) is trained as `p35-ar8`.
+
+**Why.** The clearest principled mismatch in the project: the model is trained on 16-step
+rollouts and §5's search rolls it 100+ steps. G2 already established that action-conditioning
+is ~6× stronger at h96 than h8, but that was measured on a model never trained past h16 —
+so the measurement that motivated moving G2's magnitude criterion to h96 was taken outside the
+regime the model was fit for.
+
+*Rejected alternatives.* `ar_chunks: 12` — `window_starts` requires `t + ar_chunks·H ≤ T`, so it
+costs 40–60% of the training windows against 20–35% for 8; the horizon gain does not pay for
+that much data. *Shrinking the batch* to fit the activations — `rollout_loss` chains every chunk
+into one autograd graph, so memory scales with `ar_chunks × batch_size`, and shrinking the batch
+confounds the horizon against the batch size; gradient accumulation (`--micro-batch`) keeps the
+effective batch and the optimizer step count identical instead, verified to reproduce the
+full-batch gradient to 1e-6.
+
+**No threshold moved.** G2 is unchanged and `p35-ar8` must clear it before it is used for
+search, exactly like every other checkpoint. `--tasks 0` pins its corpus to task 0 so the
+parallel §4.4 expansion cannot widen the training set and confound the comparison.
+
+### §5 — `D` may be an ensemble of standardised member distances
+
+`cfe/search/ensemble.py`. Each member's goal distances are z-scored across the candidate
+population, then averaged; the `λ` penalty is added afterwards in its own units so `λ` keeps
+its meaning.
+
+**Why.** Phase 3's follow-up measurements say the objective is noisy, not empty. Two networks of
+identical architecture trained on identical data rank the same 168 edits at only ρ = +0.209, yet
+the mean of the two tracks real outcomes better than either alone (−0.306 vs −0.238 / −0.199).
+That is a shared signal buried in independent, model-specific noise, and averaging is the direct
+remedy. Screened with no simulator on 256 labelled pairs: single member 0.6211, 4-seed ensemble
+**0.6680** (McNemar p = 0.023).
+
+*Rejected alternatives.* A raw mean — dominated by whichever member emits larger numbers, which
+is a property of its training, not of the task. Mixing model *families* (`residual` on and off) —
+measured, and it **hurts**: 0.5508, below a single member; the two families agree at ρ = 0.209
+against 0.654 for seeds of one family, and the disagreement is not the useful kind.
+
+**The cost is recorded, not hidden.** Standardising within a population makes `D`
+population-relative: it is a ranking quantity, meaningless across populations, and never
+reportable. SPEC §5 now says so and `cfe/search/ensemble.py` repeats it at the point of use.
+
+**Prior results affected: none.** No reported number has used either amendment. `p35-ar8` is
+untrained as of this entry, and the ensemble has so far been used only inside
+`scripts/diagnose_objective_quality.py`, which is a ranking diagnostic and produces no success
+rate. The recorded **G3 FAIL stands**; if an amended objective ever earns a G3 re-run it will be
+a new run with a new id, not an overwrite.
+
+---
+
 ## 2026-08-05 — G3 criteria pre-registered; `magnitude_match_tol` known too tight (OPEN)
 
 **Added.** `configs/search.yaml:gate`, six criteria for G3, plus `scripts/verify_g3.py` which

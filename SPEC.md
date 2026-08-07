@@ -196,8 +196,17 @@ length `H`. Output: predicted latents for the next `H` steps.
 - Train on LIBERO demos plus policy rollouts (successes *and* failures — failures are
   informative for dynamics even though they are excluded as imitation targets).
 - Loss: L1 or smooth-L1 on LayerNormed latents. Teacher-forced one-step loss plus a short
-  autoregressive rollout loss (2 steps) to blunt compounding error.
+  autoregressive rollout loss to blunt compounding error. The rollout length is
+  `train.ar_chunks` chunks of `H` steps and is **configurable**; 2 chunks (16 steps) is the
+  starting value and the one every Phase 2 model of record used.
 - `k = 4`, `H = 8` to start. Both configurable.
+
+**Amended 2026-08-07 (rollout-loss horizon).** "2 steps" was fixed text; it is now a knob, and
+a horizon-matched variant at `ar_chunks: 8` (64 steps) is trained and compared. The reason is a
+mismatch this project measured rather than assumed: §5's search rolls the model from the edit
+window to episode end, 100+ steps, while training only ever asked it for 16. Every model in a
+comparison must still hold `ar_chunks` and `--tasks` fixed, and any new checkpoint must clear
+G2 before it is used for search. Logged in `CHANGELOG.md`.
 
 **Required gate before this model is used for anything (see §7, G2):**
 
@@ -323,6 +332,19 @@ preceding the window.
 `z_goal`: the encoded final frame of a successful demo for the same task and initial state.
 Where multiple successful demos exist, use the minimum distance over them — goal states are
 multimodal and a single reference will punish legitimate alternative solutions.
+
+**Amended 2026-08-07 (`D` may be an ensemble).** `D` was specified against a single dynamics
+model. It may instead be the mean over an ensemble of members, each member's goal distances
+**standardised across the candidate population** before averaging (`cfe/search/ensemble.py`).
+Raw averaging is not permitted: members put their distances on different absolute scales, so a
+raw mean is decided by whichever member emits the largest numbers.
+
+The cost of that choice is stated rather than buried: standardising within a population makes
+`D` **population-dependent**. The same action sequence scores differently depending on what it
+was scored alongside. That is sound for CEM, which uses only the ranking of `J` to pick elites,
+and for within-episode ranking diagnostics. It is **not** an absolute quantity and must never be
+compared across populations or reported as a number — which rule 2 forbids for latent distances
+in any case. Logged in `CHANGELOG.md`.
 
 Run the identical procedure in latent action space: search over `u'`, decode to `a'`, replay.
 

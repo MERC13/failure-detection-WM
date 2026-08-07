@@ -212,7 +212,7 @@ G3 run `g3-phase3` reading `p3-replay-RD`.
 
 ## Unresolved: the machine hard power-offs
 
-The box has hard-rebooted six or more times — Windows Kernel-Power Event 41, **no bugcheck**, no
+The box has hard-rebooted seven or more times — Windows Kernel-Power Event 41, **no bugcheck**, no
 WHEA, no TDR, on AC. **Not thermal and not OOM**, both measured: 10 min of sustained GPU load
 held 73-74 C; across a 97-minute training run WSL `MemAvailable` never fell below 3671 MiB. The
 signature points at power delivery; the battery is 15.5% worn and the GPU transient-spikes to
@@ -221,9 +221,19 @@ signature points at power delivery; the battery is 15.5% worn and the GPU transi
 Consequences for how you run things: long jobs must be **resumable** (`run_replay.py` fsyncs
 after every replay and skips completed cells) and should be launched with `setsid` — a session
 teardown killed one training run outright. Logs go to `~/runlogs/`, **not** `/tmp`, which WSL
-clears on every boot. `~/run_with_telemetry.py` wraps a command with crash-survivable logging.
+clears on every boot — and that applies to **driver scripts too**, not just logs; a queue script
+written to `/tmp` was lost to the 2026-08-07 reboot. Keep them in `$HOME`.
+`~/run_with_telemetry.py` wraps a command with crash-survivable logging.
 `nvidia-smi`'s thermal-slowdown *counters* read 0 us on this die and are unreliable; sample
 `clocks_throttle_reasons.active` instead.
+
+**`train_dynamics.py` does not checkpoint** — artifacts are written only at the end, so a crash
+costs the whole run (~1 h at `ar_chunks=2`, ~3.9 h at 8). A resume path was considered and
+rejected: staying bit-reproducible across a resume means persisting optimizer state plus both
+RNG streams, and rule 5 makes a subtly wrong resume worse than a re-run. **Do not overlap a
+dynamics training run with simulation.** Serialising is nearly free anyway — a GPU job alongside
+sim roughly doubles each replay — and it halves what a single crash destroys.
+`~/p35_queue.sh` is the serialised driver (ar8, then the §4.4 expansion for tasks 1 and 2).
 
 ## Where the project actually stands (read before proposing a fix)
 
