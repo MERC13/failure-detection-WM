@@ -3,7 +3,7 @@
 Read this first when starting a session. Then `CLAUDE.md` and `SPEC.md` (SPEC.md is the contract
 and wins any conflict), then `PROGRESS.md` for the full history.
 
-Last updated: 2026-08-05, end of Phase 3.
+Last updated: 2026-08-06, end of Phase 3.5.
 
 ## Where the project is
 
@@ -13,7 +13,8 @@ Last updated: 2026-08-05, end of Phase 3.
 | Gate state | **G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6)** |
 | Model of record | `p2-dyn-res` (`results/runs/p2-dyn-res/`), gate run `g2-20260804T185522Z` |
 | G3 run | `g3-phase3`, reading `p3-replay-RD` (1060 replays) |
-| Next phase | **4** — but read "Where G3 failed" below first; the next move is a decision, not a build |
+| Phase 3.5 | Post-G3 investigation done. The window excuse is ruled out; see PROGRESS.md 2026-08-06 |
+| Next phase | **4** — but read "Where G3 failed" below and CLAUDE.md's standing diagnosis first |
 | Last commit | `89744da` on `main` (Phase 3 work is uncommitted) |
 
 ## Read this before touching anything

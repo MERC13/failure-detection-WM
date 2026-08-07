@@ -21,6 +21,26 @@ make test-slow       # includes sim-dependent tests
 make lint            # ruff + format
 
 make g1-check POLICY_RUN=<train_policy run_id> COLLECT_RUN=<collect_demos run_id>
+make g2-check DYN_RUN=<train_dynamics run_id> PROBE_RUN=<probe_representation run_id>
+make g3-check RUN=<run_replay run_id>
+```
+
+The Phase 3 pipeline, in order. The split between `run_search` and `run_replay` is deliberate:
+search is GPU-cheap and re-runnable in minutes, replay is CPU simulation and takes hours.
+
+```bash
+scripts/build_failure_set.py    # inject failures, keep only those that ACTUALLY fail
+scripts/run_search.py           # GPU: emits edits.jsonl for every arm x cell
+scripts/run_replay.py           # CPU sim: the ONLY source of real numbers. Resumable.
+scripts/verify_g3.py            # the gate; criteria read from configs/search.yaml
+```
+
+Diagnostics (none of these produce a reportable result):
+
+```bash
+scripts/diagnose_replay_noise.py       # determinism, re-seed spread, single-step sensitivity
+scripts/diagnose_window_oracle.py      # stage 2 with the window forced to the true fault
+scripts/diagnose_objective_quality.py  # score an objective against replayed edits, NO simulator
 ```
 
 Training and experiment entrypoints are the scripts in `scripts/`, each taking
@@ -97,6 +117,43 @@ replay bugs. If a table is missing them it is not finished, even if I forgot to 
 - Rendering runs on the CPU through mesa's `llvmpipe` (~9 sim steps/s) even though CUDA is
   available for the encoder. Rollouts, not encoding, are the bottleneck: budget ~30 min for
   50 rollouts of 300 steps.
+- **A replay costs ~16 s.** That is the unit of every cost estimate in Phase 3+: the G3 grid was
+  1060 replays ≈ 4.6 h. Running a GPU job alongside sim roughly doubles it (measured 31 s), and
+  two sim jobs at once is worse. Sequence sim work; overlap GPU with sim only when you must.
+- **The encoding cache is flat and now holds THREE kinds of episode** — `demo`, `rollout`,
+  `inject`. Select with `cfe/data/demos.py:episode_kind()` and `episode_task_id()`, **never with
+  a substring**. An injected id is named after the demo it corrupts, so `"_demo_" in cid` was
+  true for injected episodes and would have loaded corrupted data as expert data. Both filters
+  are now explicit in `train_policy.py` (demos, one task), `train_dynamics.py` (demos +
+  rollouts) and `probe_representation.py` (demos as the goal set).
+- **`train_dynamics.py --tasks` pins the training corpus.** Without it a retrain silently widens
+  its training set as new tasks land in the shared cache, and any comparison against an earlier
+  checkpoint is confounded. Every model in a comparison must use the same value.
+- **`rollout_loss` chains `ar_chunks` forward passes into one autograd graph**, so activation
+  memory scales with `ar_chunks x batch_size`. `ar_chunks=8` OOMs at the configured batch of 128
+  on an 8 GB card. Use `--micro-batch` (gradient accumulation) rather than shrinking the batch —
+  shrinking it confounds the horizon against the batch size.
+- **SPEC §6's primary replay variant replaces everything after `window_end` with the BC policy.**
+  So an edit window that starts *before* the fault means the fault is **never executed**: the
+  replay becomes "original prefix, then policy" and succeeds at the policy's own rate. This is
+  not a bug, it is what §6 specifies — but it makes window position dominate the number, and it
+  invalidated the first noise-floor run.
+- **`no_edit` in the primary variant is NOT the replay-bug control.** Only the open-loop variant
+  replays the original action sequence, and only it must read 0%. Primary-variant `no_edit`
+  measures "would the policy have rescued this anyway" — informative, and at the fault window it
+  is ~0.48, which is a very hard baseline to beat.
+- **Screen an objective before you simulate it.** `diagnose_objective_quality.py` scores any
+  objective against already-replayed edits with no simulator, using within-episode pairwise
+  ranking accuracy. A variant that does not move that number does not deserve hours of sim.
+  Pool nothing across episodes: pooled correlations are confounded by episode difficulty and
+  have flipped sign between runs on this data.
+- **Ensembled goal distance is population-relative.** `cfe/search/ensemble.py` standardises each
+  member within the candidate population before averaging, so the value is a *ranking* quantity
+  and is meaningless across populations. Never compare or report it as a distance.
+- **Oracle-assisted runs are tagged `experiment: ORACLE`** and are deliberately absent from
+  `configs/search.yaml:experiments`, so `verify_g3.py:gated_rows` structurally cannot pull them
+  into a gate. They use the ground-truth fault window, which the method does not have at
+  deployment, and can never be reported as an RSR result.
 
 ## Working style
 
@@ -114,6 +171,67 @@ replay bugs. If a table is missing them it is not finished, even if I forgot to 
   confident, plausible, wrong numbers that were caught only because they contradicted a
   separate diagnostic. When you add a measurement, measure its noise floor first and check it
   against a signal you already trust before reporting anything from it.
+
+## Where the project actually stands (read before proposing a fix)
+
+**G3 FAILed and the diagnosis is done.** Do not re-derive it. Full numbers in `PROGRESS.md`
+2026-08-05/06; the short version:
+
+- The search does not beat magnitude-matched `random_perturb`, **even when the edit window is
+  forced to the true fault** (n=56, K=8: +0.125 / −0.018 / −0.018 across λ, no CI excluding
+  zero). So this is not merely a window-selection failure.
+- The objective is **noisy, not empty**: it ranks edits correctly 62–67% of the time
+  (chance 50%). Real signal, too weak to win.
+- **Optimising harder makes it worse.** One CEM iteration beat convergence (0.589 vs 0.536) —
+  the search finds the model's errors, not good edits. Any proposal that leans harder on
+  `argmax` of a learned objective has to answer this.
+- **The action-ignoring twin picks better windows than the trained model.** Divergence peaks
+  where a fault's *consequences* appear (~52 steps late), so the trained model is
+  systematically wrong; the blind model is merely arbitrary, and arbitrary wins.
+- Seed-ensembling helps a little (0.621 → 0.668, McNemar p=0.023). Mixing model *families*
+  (residual on/off) hurts badly (0.551). `residual: false` scored 0/120 cells.
+
+## Ideas considered and analysed — do not re-propose without reading these
+
+**Q-learning / value-based edit selection.** Train `Q(s, a)`, flag timesteps with the lowest
+Q as the mistake, replace with `argmax_a Q(s, a)`. Analysed 2026-08-06.
+
+*Why it is attractive:* it is **predictive rather than retrospective**, which is exactly stage
+1's disease — Q asks "was this action bad for the outcome", answerable at the moment of the
+fault, whereas divergence only fires once consequences are visible. It also **eliminates the
+rollout**, and compounding rollout error is what buries the edit signal (an edit moves the
+prediction ~7% while 100 steps of error move it far more). And it optimises the target rather
+than a proxy.
+
+*Why it is not straightforward here:*
+1. **Data.** ~30k transitions across ~154 episodes, with **sparse terminal reward** — one
+   binary bit credit-assigned over ~200 steps, in a 7-DOF continuous action space. The ~1,400
+   replayed edits cannot help: `run_replay.py` records actions and outcomes but **not frames**,
+   so there are no states to learn from without re-replaying with capture.
+2. **`argmax_a Q` is the exploitation problem renamed.** Offline RL's canonical failure is
+   Q-overestimation on out-of-distribution actions, and we have *already measured* that
+   dynamic in this codebase. Q would likely be worse than the dynamics model, which is at
+   least anchored to predicting pixels.
+3. **Scope.** `argmax_a Q(s,a)` is a greedy policy from a value function, and SPEC §9 excludes
+   recovery policies.
+
+*The split that matters:* **Q as a critic** (score the executed actions to locate the fault)
+is in scope, cheap, and is where the value is concentrated. **Q as an actor** (generate the
+replacement) is out of scope and hits the OOD wall.
+
+*The cheap version, if pursued:* drop TD-learning entirely. Terminal-only reward means
+Monte-Carlo estimation, which is just supervised learning — fit `f(z_t, a_t) -> P(success)`
+with the episode outcome as the label. No bootstrapping, no Bellman instability, a small MLP
+head on cached latents.
+
+*The free experiment to run first — the ceiling test.* Every injected failure has its
+uncorrupted source demo **at the identical initial state**, and the true fault window is known,
+for 56 pairs. Train a classifier to separate clean from corrupted per timestep and measure
+window IoU against those known windows. It is oracle-assisted and not deployable, but it
+answers the question underneath all of this: **do these latents contain enough information to
+localise a fault at all?** If no, no window-selection method can work and the negative result
+is far stronger. If yes, divergence is simply the wrong readout. Pure GPU on cached latents,
+no simulation.
 
 ## Scope discipline
 

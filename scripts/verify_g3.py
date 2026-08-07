@@ -298,7 +298,6 @@ def check_search_deterministic(run: str, seed: int) -> Result:
     """
     import torch
 
-    from cfe.dynamics.data import load_episode  # noqa: F401  (import check)
     from cfe.search.arms import SEARCH, edit_from_result, run_search_arm
     from cfe.search.cem import CEMConfig
     from scripts.run_search import build_problem, cell_seed, load_models

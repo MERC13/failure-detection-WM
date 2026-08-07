@@ -128,6 +128,20 @@ def episode_kind(cache_id: str) -> str:
     return m.group(1) if m else "unknown"
 
 
+_TASK_RE = re.compile(r"_t(\d+)_")
+
+
+def episode_task_id(cache_id: str) -> int | None:
+    """Which task a cache id belongs to, or `None` if the id does not encode one.
+
+    The cache is flat and now spans several tasks, so a training run that does not pin this is
+    a training run whose corpus changes whenever new data is collected. `train_dynamics.py`
+    uses it to hold the corpus fixed across a model comparison.
+    """
+    m = _TASK_RE.search(cache_id)
+    return int(m.group(1)) if m else None
+
+
 def read_episode(path: str | Path, episode_id: str) -> dict:
     """Recorded `actions (T,7)` and `states (T,110)`.
 

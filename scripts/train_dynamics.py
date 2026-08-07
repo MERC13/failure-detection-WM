@@ -37,6 +37,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-id", default=None)
     p.add_argument("--epochs", type=int, default=None, help="override config, for smoke tests")
     p.add_argument("--limit-episodes", type=int, default=None)
+    # Pin the training corpus. The cache is flat and spans several tasks, so without this a
+    # retrain silently widens its training set as new data lands and any comparison against an
+    # earlier checkpoint is confounded. Every model in a comparison must use the same value.
+    p.add_argument(
+        "--tasks", type=int, nargs="*", default=None, help="restrict training to these task ids"
+    )
+    # The action-ignoring twin exists for G2 and for §6's baseline. When training extra ensemble
+    # members it is dead weight — half the compute for a model nothing reads.
+    p.add_argument(
+        "--skip-twin", action="store_true", help="train only the action-conditioned model"
+    )
+    p.add_argument("--ar-chunks", type=int, default=None, help="override train.ar_chunks")
+    # `rollout_loss` chains `ar_chunks` forward passes into one autograd graph, so activation
+    # memory scales with ar_chunks x batch_size. On this 8 GB card ar_chunks=8 OOMs at the
+    # configured batch of 128 and needs roughly a quarter of it.
+    p.add_argument("--batch-size", type=int, default=None, help="override train.batch_size")
+    p.add_argument(
+        "--micro-batch",
+        type=int,
+        default=None,
+        help="split each batch into accumulation steps of this size; keeps the effective batch",
+    )
     return p.parse_args()
 
 
@@ -115,19 +137,33 @@ def train_one(model, train_idx, val_idx, tr: dict, ar_chunks: int, device, seed:
         model.train()
         order = rng.permutation(len(train_idx))
         total, n = 0.0, 0
+        # `micro_batch` splits each batch into chunks that are backpropagated separately and
+        # accumulated. `rollout_loss` chains `ar_chunks` forward passes into one graph, so
+        # activation memory scales with ar_chunks x batch_size and a long-horizon run does not
+        # fit at the configured batch. Accumulating keeps the EFFECTIVE batch and the optimizer
+        # step count identical to a short-horizon run, so a comparison between them isolates the
+        # horizon instead of confounding it with batch size.
+        micro = int(tr.get("micro_batch") or tr["batch_size"])
         for start in range(0, len(order), int(tr["batch_size"])):
             rows = order[start : start + int(tr["batch_size"])]
-            b = train_idx.gather(rows)
-            loss, _ = rollout_loss(
-                model,
-                torch.from_numpy(b["context"]).to(device),
-                torch.from_numpy(b["actions"]).to(device),
-                torch.from_numpy(b["targets"]).to(device),
-                ar_chunks,
-                tr["loss"],
-            )
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            loss_val = 0.0
+            for m0 in range(0, len(rows), micro):
+                sub = rows[m0 : m0 + micro]
+                b = train_idx.gather(sub)
+                loss, _ = rollout_loss(
+                    model,
+                    torch.from_numpy(b["context"]).to(device),
+                    torch.from_numpy(b["actions"]).to(device),
+                    torch.from_numpy(b["targets"]).to(device),
+                    ar_chunks,
+                    tr["loss"],
+                )
+                # Weight by the micro-batch's share so the accumulated gradient equals the
+                # gradient of the mean loss over the whole batch.
+                (loss * (len(sub) / len(rows))).backward()
+                loss_val += float(loss.detach()) * (len(sub) / len(rows))
+            loss = torch.tensor(loss_val)
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(tr["grad_clip"]))
             opt.step()
             total += float(loss.detach()) * len(rows)
@@ -160,6 +196,12 @@ def main() -> int:
     tr = dict(cfg["train"])
     if args.epochs is not None:
         tr["epochs"] = args.epochs
+    if args.ar_chunks is not None:
+        tr["ar_chunks"] = int(args.ar_chunks)
+    if args.batch_size is not None:
+        tr["batch_size"] = int(args.batch_size)
+    if args.micro_batch is not None:
+        tr["micro_batch"] = int(args.micro_batch)
     ar_chunks = int(tr["ar_chunks"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -175,19 +217,25 @@ def main() -> int:
     # episode existed, so the filter restores their composition rather than altering it. The
     # per-task counts are printed and recorded because the cache now spans more than one task,
     # and a retrain that silently widened its training set would be invisible otherwise.
-    from cfe.data.demos import DEMO, ROLLOUT, episode_kind
+    from cfe.data.demos import DEMO, ROLLOUT, episode_kind, episode_task_id
 
     all_ids = cache.episode_ids()
     ids = [e for e in all_ids if episode_kind(e) in (DEMO, ROLLOUT)]
+    if args.tasks is not None:
+        wanted = set(args.tasks)
+        ids = [e for e in ids if episode_task_id(e) in wanted]
+        if not ids:
+            raise RuntimeError(
+                f"no demo/rollout episodes for task(s) {sorted(wanted)} in {cache.root}"
+            )
     if args.limit_episodes:
         ids = ids[: args.limit_episodes]
     n_demo = sum(1 for e in ids if episode_kind(e) == DEMO)
     n_roll = len(ids) - n_demo
-    by_task: dict[str, int] = {}
+    by_task: dict[int | None, int] = {}
     for e in ids:
-        parts = e.split("_t", 1)
-        key = parts[1].split("_", 1)[0] if len(parts) > 1 else "?"
-        by_task[key] = by_task.get(key, 0) + 1
+        t = episode_task_id(e)
+        by_task[t] = by_task.get(t, 0) + 1
 
     print(f"train_dynamics  run_id={run_id}  seed={args.seed}  device={device}")
     print(f"cache={cache.root}")
@@ -195,7 +243,10 @@ def main() -> int:
         f"episodes: {len(ids)} of {len(all_ids)} cached "
         f"({n_demo} demo, {n_roll} rollout; excluded {len(all_ids) - len(ids)} other)"
     )
-    print(f"episodes by task: {dict(sorted(by_task.items()))}")
+    print(
+        f"episodes by task: {dict(sorted(by_task.items(), key=lambda kv: (kv[0] is None, kv[0])))}"
+        f"   (--tasks {args.tasks if args.tasks is not None else 'unset: ALL cached tasks'})"
+    )
     print(f"reduction={dyn_cfg.reduction} -> R={dyn_cfg.r} tokens/frame")
     print("-" * 78)
 
@@ -216,7 +267,13 @@ def main() -> int:
     print("-" * 78)
 
     models, histories, seconds = {}, {}, {}
-    for tag, ignore in (("dynamics", False), ("action_ignoring", True)):
+    to_train = [("dynamics", False)]
+    if not args.skip_twin:
+        to_train.append(("action_ignoring", True))
+    else:
+        print("--skip-twin: training the action-conditioned model only. This checkpoint cannot")
+        print("             serve G2 or §6's action_ignoring_dynamics baseline on its own.")
+    for tag, ignore in to_train:
         model = LatentDynamics(dyn_cfg, ignore_actions=ignore).to(device)
         n_params = sum(p.numel() for p in model.parameters())
         print(f"{tag}: {n_params:,} params  ignore_actions={ignore}")
@@ -236,6 +293,8 @@ def main() -> int:
         "k_context": dyn_cfg.k_context,
         "horizon": dyn_cfg.horizon,
         "ar_chunks": ar_chunks,
+        "batch_size": int(tr["batch_size"]),
+        "micro_batch": tr.get("micro_batch"),
         "n_episodes": len(ids),
         "n_demo_episodes": n_demo,
         "n_rollout_episodes": n_roll,
@@ -244,6 +303,11 @@ def main() -> int:
         "n_train_windows": len(train_idx),
         "n_val_windows": len(val_idx),
         "n_params": int(sum(p.numel() for p in models["dynamics"].parameters())),
+        "tasks_filter": args.tasks,
+        "task_composition": {
+            str(k): v for k, v in sorted(by_task.items(), key=lambda kv: (kv[0] is None, kv[0]))
+        },
+        "twin_trained": not args.skip_twin,
         "latents_ram_mb": round(mb, 1),
         "final_val_loss": {k: histories[k][-1]["val_loss"] for k in histories},
         "train_seconds": {k: round(v, 1) for k, v in seconds.items()},
@@ -257,7 +321,14 @@ def main() -> int:
     torch.save(
         {
             "dynamics": models["dynamics"].state_dict(),
-            "action_ignoring": models["action_ignoring"].state_dict(),
+            # Absent when --skip-twin. Consumers that need it (verify_g2.py,
+            # scripts/run_search.py's action_ignoring arm) must fail loudly rather than
+            # silently fall back to the action-conditioned weights.
+            **(
+                {"action_ignoring": models["action_ignoring"].state_dict()}
+                if "action_ignoring" in models
+                else {}
+            ),
             "dynamics_config": cfg["dynamics"],
             "train_config": tr,
             "val_episode_ids": val_ids,

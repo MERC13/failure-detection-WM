@@ -43,13 +43,16 @@ def spearman(a: np.ndarray, b: np.ndarray) -> float:
     `b` is a binary success flag, so every value ties with dozens of others and an ordinal
     ranking would fabricate an ordering that does not exist.
     """
-    ra, rb = _ranks(np.asarray(a, dtype=np.float64)), _ranks(np.asarray(b, dtype=np.float64))
+    ra, rb = ranks(np.asarray(a, dtype=np.float64)), ranks(np.asarray(b, dtype=np.float64))
     ra, rb = ra - ra.mean(), rb - rb.mean()
     denom = np.sqrt((ra**2).sum() * (rb**2).sum())
     return float((ra * rb).sum() / denom) if denom > 0 else 0.0
 
 
-def _ranks(v: np.ndarray) -> np.ndarray:
+def ranks(v: np.ndarray) -> np.ndarray:
+    """Ranks with ties averaged. Public because the objective-quality screen ranks candidates
+    within an episode before correlating, and a cross-module import of a private name invites
+    someone to change it without knowing who depends on it."""
     order = np.argsort(v, kind="stable")
     r = np.empty(len(v), dtype=np.float64)
     r[order] = np.arange(len(v), dtype=np.float64)

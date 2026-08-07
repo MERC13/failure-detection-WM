@@ -427,3 +427,44 @@ def test_a_training_step_is_deterministic_under_a_seed():
         return float(loss)
 
     assert one_step() == one_step()
+
+
+# --- gradient accumulation (Phase 3.5) --------------------------------------
+
+
+def test_micro_batch_accumulation_reproduces_the_full_batch_gradient():
+    """`rollout_loss` chains ar_chunks forward passes into one graph, so a long-horizon run does
+    not fit at the configured batch. Accumulating micro-batches is only a valid substitute if the
+    accumulated gradient equals the full-batch gradient — otherwise the horizon-matched model is
+    trained differently from its control and the comparison means nothing."""
+    torch.manual_seed(0)
+    cfg = DynamicsConfig(
+        k_context=2,
+        horizon=4,
+        reduction="grid2",
+        d_model=32,
+        n_layers=1,
+        n_heads=2,
+        dropout=0.0,
+        ffn_mult=2,
+        latent_dim=8,
+    )
+    model = LatentDynamics(cfg)
+    b, ar = 8, 2
+    ctx = torch.randn(b, cfg.k_context, cfg.r, cfg.latent_dim)
+    act = torch.randn(b, ar * cfg.horizon, 7)
+    tgt = torch.randn(b, ar * cfg.horizon, cfg.r, cfg.latent_dim)
+
+    model.zero_grad(set_to_none=True)
+    rollout_loss(model, ctx, act, tgt, ar)[0].backward()
+    full = [p.grad.clone() for p in model.parameters()]
+
+    model.zero_grad(set_to_none=True)
+    for lo in (0, 4):  # two micro-batches of 4, each weighted by its share
+        sl = slice(lo, lo + 4)
+        loss, _ = rollout_loss(model, ctx[sl], act[sl], tgt[sl], ar)
+        (loss * (4 / b)).backward()
+    accum = [p.grad.clone() for p in model.parameters()]
+
+    for f, a in zip(full, accum, strict=True):
+        assert torch.allclose(f, a, atol=1e-6), (f - a).abs().max()

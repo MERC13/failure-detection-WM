@@ -348,3 +348,81 @@ def test_search_episode_returns_none_when_stage_one_found_nothing():
         )
         is None
     )
+
+
+# --- the less-optimised candidates (Phase 3.5 exploitation test) ------------
+
+
+def test_elite_mean_and_first_iteration_candidates_are_returned():
+    problem, _ = _problem()
+    s = 8
+    problem = _with_goal(problem, s, np.array([0.2, -0.1, 0.1]))
+    res = cem_search(
+        ToyDynamics(),
+        problem,
+        s,
+        budget_k=4,
+        lam=0.0,
+        cfg=_cfg(n_iters=4),
+        rng=np.random.default_rng(0),
+    )
+    for a in (res.elite_mean_actions, res.first_iter_actions):
+        assert a is not None
+        assert a.shape == (4, 7)
+        assert a.min() >= -1.0 and a.max() <= 1.0
+        assert set(np.unique(a[:, 6])) <= {-1.0, 1.0}, "gripper must stay binary"
+
+
+def test_the_elite_mean_is_less_optimised_than_the_best():
+    """It is the average of the elites, so on the objective it cannot beat the best of them."""
+    from cfe.search.objective import evaluate_candidates
+
+    problem, _ = _problem()
+    s = 8
+    problem = _with_goal(problem, s, np.array([0.25, -0.2, 0.15]))
+    res = cem_search(
+        ToyDynamics(),
+        problem,
+        s,
+        budget_k=4,
+        lam=0.0,
+        cfg=_cfg(n_iters=6),
+        rng=np.random.default_rng(0),
+    )
+    j = evaluate_candidates(
+        ToyDynamics(),
+        problem,
+        s,
+        np.stack([res.actions, res.elite_mean_actions, res.first_iter_actions]),
+        lam=0.0,
+    )["objective"]
+    assert j[0] <= j[1], "best should not be worse than the elite mean"
+    assert j[0] <= j[2], "best should not be worse than iteration 1's best"
+
+
+def test_the_gripper_in_the_elite_mean_is_a_vote_not_an_average():
+    """Averaging {-1,+1} would emit a value the env never receives."""
+    problem, _ = _problem()
+    s = 8
+    problem = _with_goal(problem, s, np.array([0.2, -0.1, 0.1]))
+    res = cem_search(
+        ToyDynamics(),
+        problem,
+        s,
+        budget_k=4,
+        lam=0.0,
+        cfg=_cfg(search_gripper=True, init_flip_prob=0.5, n_iters=4),
+        rng=np.random.default_rng(2),
+    )
+    assert set(np.unique(res.elite_mean_actions[:, 6])) <= {-1.0, 1.0}
+
+
+def test_candidates_are_deterministic_under_the_same_seed():
+    problem, _ = _problem()
+    s = 8
+    problem = _with_goal(problem, s, np.array([0.2, -0.1, 0.1]))
+    kw = {"budget_k": 4, "lam": 0.1, "cfg": _cfg(n_iters=4)}
+    a = cem_search(ToyDynamics(), problem, s, rng=np.random.default_rng(5), **kw)
+    b = cem_search(ToyDynamics(), problem, s, rng=np.random.default_rng(5), **kw)
+    assert np.array_equal(a.elite_mean_actions, b.elite_mean_actions)
+    assert np.array_equal(a.first_iter_actions, b.first_iter_actions)

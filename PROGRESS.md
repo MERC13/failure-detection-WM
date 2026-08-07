@@ -1490,3 +1490,109 @@ Then, in order:
    reported diagnostic with no criterion attached, and the true figures are in this entry.
 5. The §4.4 expansion to tasks 1-2 is built and queued but unrun. G4 needs it whatever the
    method question resolves to.
+
+## 2026-08-06 — Phase 3.5: why the search fails, and what does not fix it
+
+Post-G3 investigation. Nothing here is a reportable result: the window-oracle runs are
+oracle-assisted and the objective screen is a ranking diagnostic (CLAUDE.md rule 2).
+
+### The window-oracle ablation — the excuse is gone
+
+G3's FAIL could have been "stage 1 picks bad windows". Forcing the window to the ground-truth
+injection point and re-running stage 2 (`p3-oracle` n=10, `p3-oracle56` n=56, K=8):
+
+| λ | search | `random_perturb` | diff | 95% CI |
+|---|---|---|---|---|
+| 0.01 | 0.536 | 0.411 | +0.125 | [−0.036, +0.304] |
+| 0.1 | 0.375 | 0.393 | −0.018 | [−0.161, +0.143] |
+| 1.0 | 0.375 | 0.393 | −0.018 | [−0.125, +0.089] |
+
+**At n=10 the same measurement read +0.30 / +0.10 / +0.20, all positive.** It did not survive
+n=56. Recorded because stopping at n=10 would have produced a confident wrong conclusion, and
+because it is the clearest example in this project of an underpowered result pointing the wrong
+way.
+
+Given the right window, the world model does not choose better edits than chance.
+
+### The objective is noisy, not empty
+
+Scoring replayed edits against their real outcomes, **within episode** (pooling confounds
+episode difficulty with edit quality and has flipped sign between runs):
+
+| Objective | pairwise accuracy | n informative pairs |
+|---|---|---|
+| single `p2-dyn-res` | 0.6211 | 256 |
+| + `p2-dyn` | 0.5508 | 256 |
+| **+ 3 seeds (`p35-seed1..3`)** | **0.6680** | 256 |
+| all 5 | 0.6445 | 256 |
+
+Seed ensembling is a real gain — paired over identical pairs it fixed 18 and broke 6,
+**McNemar p = 0.023**. Mixing the `residual: false` family in *destroys* signal (0.5508, barely
+above chance); those two models agree with each other at only ρ = 0.209.
+
+An earlier pooled figure suggested the 2-model ensemble helped (ρ −0.238 → −0.306). That was
+the episode-difficulty confound, and it is wrong. Corrected here.
+
+### The search exploits its own model's error
+
+Candidate bank (`p3-bank`, 6 candidates × 56 episodes at the true window, K=8):
+
+| candidate | RSR | realised edit size |
+|---|---|---|
+| `no_edit` | 0.482 | 0.000 |
+| `random_perturb` ×2 | 0.393 / 0.375 | 0.425 |
+| **CEM iteration-1 best** | **0.589** | 0.360 |
+| CEM elite mean | 0.518 | 0.368 |
+| CEM best (the method) | 0.536 | 0.432 |
+
+The **least**-optimised candidate replays best. Not significant (CI [−0.179, +0.054]) and
+partly confounded — iteration-1's edits are 17% smaller, and smaller is independently better
+here (`no_edit` at magnitude 0 scores 0.482 while random at 0.425 scores 0.39). The clean
+separation would be `random_perturb` at magnitude 0.36; not yet run.
+
+At *matched* magnitude the model does contribute: CEM-best (0.432) beats random (0.425) by
++0.14–0.16. That is the strongest pro-model evidence in the project, and it still is not
+CI-clean.
+
+**`no_edit` at the fault window is 0.482.** The BC policy rescues nearly half the episodes on
+its own, and most edits make things worse. The method is fighting a strong "don't interfere"
+baseline.
+
+### Infrastructure
+
+- `cfe/search/ensemble.py` — standardise-then-average over N members. Population-relative, so a
+  ranking quantity only.
+- `scripts/diagnose_objective_quality.py` — **screens an objective with no simulator**, against
+  already-replayed edits. This is what makes iterating on the objective affordable at all;
+  before it, each variant cost ~1.6 h of simulation.
+- `cfe/search/cem.py` — `CEMResult` now returns the elite mean and iteration-1 best.
+- `train_dynamics.py` — `--tasks` (pins the corpus), `--skip-twin`, `--ar-chunks`,
+  `--micro-batch` (gradient accumulation; verified to reproduce the full-batch gradient to
+  1e-6, so a long-horizon run is not confounded by a smaller batch).
+
+### Surprises
+
+1. **`ar_chunks=8` OOMs at the configured batch** — `rollout_loss` chains every chunk into one
+   autograd graph. Gradient accumulation rather than a smaller batch, or the horizon comparison
+   is confounded by batch size.
+2. **The first noise-floor run measured a ceiling, not a floor.** Its windows sat *before* the
+   injections, and §6's primary variant replaces everything after the window with the policy —
+   so the fault was never executed and every arm read RSR 1.000. Two faults, both mine:
+   unstratified episode selection (all `early_release`) and a fixed mid-episode window. Fixed to
+   stratify and to place the window relative to the fault. It also surfaced the general property.
+3. **A session restart killed the `ar8` training** (empty log, no artifacts). Long jobs now
+   launch under `setsid`.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — nothing here re-runs a gate.
+
+### Next
+
+`CLAUDE.md` now carries the standing diagnosis and the analysed-and-rejected ideas, including
+**Q-learning** (attractive because predictive and rollout-free; blocked by ~30k transitions with
+terminal-only reward, and because `argmax_a Q` is the exploitation failure renamed). The cheap
+first step recorded there is the **ceiling test**: can a classifier separate clean from corrupted
+per timestep on the 56 matched pairs, and does it localise the known fault window? Pure GPU on
+cached latents. If it cannot, no window-selection method can work and the negative result is
+much stronger.

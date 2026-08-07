@@ -105,12 +105,34 @@ def load_models(dyn_run: str, device):
         raise FileNotFoundError(f"{path} not found; run scripts/train_dynamics.py first")
     ck = torch.load(path, map_location="cpu", weights_only=False)
     cfg = DynamicsConfig.from_dict(ck["dynamics_config"])
+    if "action_ignoring" not in ck:
+        raise KeyError(
+            f"{path} has no action_ignoring twin (trained with --skip-twin). The twin is "
+            f"SPEC.md §6's action_ignoring_dynamics baseline and G2's control; a checkpoint "
+            f"without one cannot stand in for it."
+        )
     models = {}
     for tag, ignore in (("dynamics", False), ("action_ignoring", True)):
         m = LatentDynamics(cfg, ignore_actions=ignore).to(device)
         m.load_state_dict(ck[tag])
         models[tag] = m.eval()
     return models, cfg, ck
+
+
+def load_dynamics_only(dyn_run: str, device):
+    """Just the action-conditioned model. For ensemble members trained with `--skip-twin`."""
+    import torch
+
+    from cfe.dynamics.model import DynamicsConfig, LatentDynamics
+
+    path = REPO_ROOT / "results" / "runs" / dyn_run / "dynamics.pt"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found; run scripts/train_dynamics.py first")
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    cfg = DynamicsConfig.from_dict(ck["dynamics_config"])
+    m = LatentDynamics(cfg, ignore_actions=False).to(device)
+    m.load_state_dict(ck["dynamics"])
+    return m.eval(), cfg, ck
 
 
 def build_problem(cache, record, dyn_cfg, device):

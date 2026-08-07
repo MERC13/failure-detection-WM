@@ -84,6 +84,19 @@ class CEMResult:
     is_identity: bool
     iterations: list[dict]
 
+    #: Less-optimised candidates from the same run, for the model-exploitation question.
+    #:
+    #: If the world model's objective is only weakly correlated with real success — measured at
+    #: 67.3% pairwise within an episode — then driving the CEM to the argmin lands on whichever
+    #: candidate best exploits the model's *error*, not the best real edit. That is the standard
+    #: model-based RL failure. These two give the same search at lower optimisation pressure, so
+    #: replaying all three answers it directly instead of by argument.
+    #:
+    #: `elite_mean_actions` is the mean of the final iteration's elites; `first_iter_actions` is
+    #: the best candidate of iteration 1. Both are `None` only if the search ran zero iterations.
+    elite_mean_actions: np.ndarray | None = None
+    first_iter_actions: np.ndarray | None = None
+
 
 def cem_search(
     model,
@@ -108,6 +121,8 @@ def cem_search(
 
     best = original.copy()
     best_j = np.inf
+    elite_mean_actions: np.ndarray | None = None
+    first_iter_actions: np.ndarray | None = None
     best_dist = np.nan
     best_pen = np.nan
     baseline_j = np.nan
@@ -141,9 +156,20 @@ def cem_search(
             }
         )
 
+        if it == 0:
+            first_iter_actions = cand[order[0]].copy()
+
         # Refit. `ddof=0` because this is the elite population's own spread, not an estimate of
         # a wider population's.
         elite_actions = cand[elite]
+        # The elite mean is a legitimate action sequence in its own right: dims 0-5 average
+        # naturally, and the gripper is taken by majority vote because averaging {-1,+1} would
+        # produce a value the env never sees (CLAUDE.md: dim 6 is not continuous).
+        em = np.empty_like(original)
+        em[:, :N_DELTA] = elite_actions[:, :, :N_DELTA].mean(axis=0)
+        grip_mean = elite_actions[:, :, GRIPPER_DIM].mean(axis=0)
+        em[:, GRIPPER_DIM] = np.where(grip_mean >= 0.0, 1.0, -1.0)
+        elite_mean_actions = np.clip(em, ACTION_LOW, ACTION_HIGH)
         mean = elite_actions[:, :, :N_DELTA].mean(axis=0)
         std = np.maximum(elite_actions[:, :, :N_DELTA].std(axis=0), cfg.std_floor)
         if cfg.search_gripper:
@@ -162,6 +188,8 @@ def cem_search(
         n_forward_passes=n_fwd,
         is_identity=bool(np.array_equal(best, original)),
         iterations=history,
+        elite_mean_actions=elite_mean_actions,
+        first_iter_actions=first_iter_actions,
     )
 
 
