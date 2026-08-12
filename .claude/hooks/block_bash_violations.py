@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """PreToolUse hook for Bash: refuse `git push`, and refuse shell writes into `cfe/eval/`.
 
-WORKFLOW.md names two rules worth hard enforcement: blocking edits to `cfe/eval/**` and
-blocking `git push`. The file-tool half lives in `block_frozen_eval.py`; this covers the shell,
-which can reach both.
+Two rules worth hard enforcement, not just CLAUDE.md convention: blocking edits to `cfe/eval/**`
+and blocking `git push`. The file-tool half lives in `block_frozen_eval.py`; this covers the
+shell, which can reach both.
 
 The `cfe/eval/` check matters because a hook that only guards Edit and Write is trivially
 sidestepped by `sed -i`, a heredoc, or a redirect — not maliciously, just by reaching for the
@@ -40,7 +40,7 @@ def main() -> int:
 
     if GIT_PUSH.search(command):
         print(
-            "BLOCKED: `git push` is disabled in this repo (WORKFLOW.md).\n"
+            "BLOCKED: `git push` is disabled in this repo.\n"
             "\n"
             "Commits are fine; publishing is the user's call and is done by them. If a push is\n"
             "genuinely wanted, ask — do not route around this with a different remote command.",

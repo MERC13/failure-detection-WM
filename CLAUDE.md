@@ -4,8 +4,7 @@ Research codebase. The contract is `@SPEC.md` — read it before writing code. W
 and SPEC.md conflict, SPEC.md wins and you should tell me about the conflict.
 
 Read this file first, then `SPEC.md`, then `PROGRESS.md` for the full history. `CHANGELOG.md`
-records every change to a metric, threshold, gate, or the replay protocol. `WORKFLOW.md` is the
-prompting playbook and holds the unrun P4-P6 phase prompts.
+records every change to a metric, threshold, gate, or the replay protocol.
 
 ## What this project is
 

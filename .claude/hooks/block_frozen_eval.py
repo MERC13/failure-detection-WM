@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """PreToolUse hook: refuse edits to `cfe/eval/**` (SPEC.md I3, CLAUDE.md rule 1).
 
-WORKFLOW.md: "CLAUDE.md shapes behavior; it doesn't block anything. For the two rules whose
-violation would be unrecoverable, use a PreToolUse hook instead." This is one of the two.
+CLAUDE.md shapes behavior; it doesn't block anything. For the two rules whose violation would
+be unrecoverable, a PreToolUse hook is used instead — this is one of the two.
 
 `cfe/eval/` holds the reported metrics and the replay protocol. Editing them rewrites every
 result the project has ever produced, and the damage is silent — old numbers stay in
