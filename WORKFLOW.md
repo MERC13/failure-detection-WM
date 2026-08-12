@@ -167,6 +167,13 @@ why. Do not tune it until it wins. A failed G3 changes the project and I need to
 
 ### P4 — Scale, C1
 
+**This prompt assumes C1 succeeded at G3.** It didn't: C1 is closed as a negative result as of
+2026-08-11, after ten independently replayed, non-oracle search-method configurations all
+failed to beat `random_perturb` (CLAUDE.md, "Where the project actually stands"; full evidence
+in `PROGRESS.md`). Paste this prompt only after deciding, with the user, that there's a genuine
+reason to reopen C1 — new data (the task 1/2 expansion), a new method, or both — not as the
+default next phase.
+
 ```
 Phase 4. Scale to the full failure set in SPEC.md §4.4 — ~200 failures, 3+ tasks, natural
 and injected. Run all four mandatory baselines.

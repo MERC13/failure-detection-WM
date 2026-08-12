@@ -417,6 +417,51 @@ def test_the_gripper_in_the_elite_mean_is_a_vote_not_an_average():
     assert set(np.unique(res.elite_mean_actions[:, 6])) <= {-1.0, 1.0}
 
 
+def test_default_evaluate_fn_is_unchanged():
+    """Omitting `evaluate_fn` must reproduce exactly what every pre-existing caller gets —
+    `cfe/search/critic.py` adds a second scoring function, and this must not move the first."""
+    problem, _ = _problem()
+    s = 8
+    problem = _with_goal(problem, s, np.array([0.2, -0.1, 0.1]))
+    kw = {"budget_k": 4, "lam": 0.1, "cfg": _cfg(n_iters=4)}
+    a = cem_search(ToyDynamics(), problem, s, rng=np.random.default_rng(7), **kw)
+    b = cem_search(
+        ToyDynamics(),
+        problem,
+        s,
+        rng=np.random.default_rng(7),
+        evaluate_fn=evaluate_candidates,
+        **kw,
+    )
+    assert np.array_equal(a.actions, b.actions)
+
+
+def test_evaluate_fn_override_is_actually_used():
+    """The new parameter cfe/search/critic.py relies on must be threaded through, not ignored."""
+    problem, _ = _problem()
+    s = 8
+    calls = []
+
+    def fake_evaluate(model, problem, window_start, cand, lam):
+        calls.append(len(cand))
+        out = evaluate_candidates(model, problem, window_start, cand, lam)
+        out["objective"] = out["objective"] * 0.0  # force every candidate to tie at zero
+        return out
+
+    res = cem_search(
+        ToyDynamics(),
+        problem,
+        s,
+        budget_k=2,
+        lam=0.0,
+        cfg=_cfg(n_iters=2),
+        rng=np.random.default_rng(0),
+        evaluate_fn=fake_evaluate,
+    )
+    assert calls, "evaluate_fn override was never called"
+    assert res.objective == 0.0
+
+
 def test_candidates_are_deterministic_under_the_same_seed():
     problem, _ = _problem()
     s = 8

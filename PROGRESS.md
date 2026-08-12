@@ -1661,3 +1661,1109 @@ been used only in a no-simulator ranking diagnostic. **The G3 FAIL stands as rec
 3. Still open for the user: `magnitude_match_tol`; whether SPEC §5's window criterion changes;
    and whether to run the **ceiling test** (can a classifier localise the fault at all from
    these latents, on the 56 matched clean/corrupted pairs) before any further method work.
+
+---
+
+## 2026-08-10 — Ceiling test: latents localise 3/4 fault causes; the heuristic and even a true-counterfactual pointwise diff both miss them
+
+Runs the free experiment named in CLAUDE.md and in this file's last entry. New script
+`scripts/diagnose_fault_localization.py`, run `ceiling-test-v2`, on all 56 task-0 injected
+failures. **No simulator, no replay, no success/fail outcome anywhere in it.** Every number is
+diagnostic only (CLAUDE.md rule 2); tests in `tests/test_diagnose_fault_localization.py`.
+
+### Three parts, one scoring path
+
+Every part proposes an 8-step window (K=8, stride=4, matching the search's own convention) and
+is scored by the frozen `window_iou` against the ground-truth injection window — directly
+comparable to the trained model's stage-1 heuristic (mean IoU 0.035, this file, 2026-08-05).
+
+| | early_release | grasp_offset | mistimed_close | wrong_target | pooled | pooled AUROC |
+|---|---|---|---|---|---|---|
+| Part 1: oracle pairwise divergence (`\|z_corrupted − z_clean\|`, true counterfactual, no model) | 0.185 | 0.016 | 0.000 | 0.003 | 0.051 | — |
+| Part 2: LOEO probe on `z_t` alone (never sees its own episode's label or its clean pair) | 0.186 | 0.259 | 0.139 | 0.361 | 0.236 | 0.880 |
+| Part 3: position-only control (`t`, `t/T` — no latent at all) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.419 |
+
+Trained-model divergence heuristic, for reference (2026-08-05): early_release 0.094,
+grasp_offset 0.000, mistimed_close 0.000, wrong_target 0.094, pooled ≈0.035.
+
+### The confound checked before trusting this, and why it's ruled out
+
+Part 2's first run (`ceiling-test-v1`, latent-only, no Part 3 yet) read pooled IoU 0.236 / AUROC
+0.88 — a large jump over Part 1 and the trained heuristic. `libero_object` demos have very
+regular phase timing (gripper closes ~t=42, releases ~t=128 in nearly every demo —
+`cfe/data/inject.py`'s own measurement), and every injected cause's window sits at a fixed phase
+relative to those events. That is exactly the shape of the confound that produced this file's
+2026-08-06 "first noise-floor run measured a ceiling, not a floor" surprise: a probe could score
+well by memorising *when* faults happen without ever reading `z_t`.
+
+Part 3 is the control: the identical probe and LOEO procedure, given only `(t, t/T)`. It scored
+pooled IoU **0.000** and AUROC **0.419** (at or below chance) on every cause. Position alone
+explains none of Part 2's result — the gain is attributable to latent content, not timing.
+
+### Reading
+
+- **The oracle pairwise diff (Part 1) barely beats the trained heuristic** (0.051 vs 0.035)
+  despite using the true clean counterpart — so the trained dynamics model's prediction error
+  was never the main bottleneck of stage 1. A fault's *instantaneous* effect on one frame's
+  pooled latent, relative to its clean counterpart at the same timestep, is close to invisible
+  for three of four causes. This matches the existing per-cause pattern exactly: `early_release`
+  (a discrete, immediately visible gripper-state flip) is the one cause any pointwise method
+  finds; the continuous/subtle causes are not.
+- **The LOEO classifier (Part 2) recovers real signal for exactly those three causes** —
+  grasp_offset 0.016→0.259, mistimed_close 0.000→0.139, wrong_target 0.003→0.361 — by learning
+  what a fault-in-progress looks like *in general* across episodes, rather than diffing against
+  one reference. It never sees the held-out episode's own label, only the other 55 episodes' —
+  the same generalisation structure as the trained dynamics model or the BC policy, not the same
+  kind of access as the ground-truth-forced-window diagnostics elsewhere in Phase 3.5.
+- **Answer to Phase 3.5's open question: yes, localisable.** Per this file's 2026-08-06 decision
+  tree, that means the retrospective *readout* (per-step divergence ranking) is the wrong tool,
+  not that the representation is empty. It does not by itself fix G3 — stage 2 (CEM within a
+  known window) was separately shown to barely beat `random_perturb` even at the *true* window
+  (2026-08-06), so a better window is necessary but not sufficient.
+
+### Caveats
+
+- The probe's training labels come from the injection records, but the probe only ever sees a
+  *different* episode's label when predicting a given one — structurally closer to "a trained
+  component" than to the ground-truth-window diagnostics, but still only validated here as a
+  diagnostic, not exercised as a deployed pipeline stage.
+- Tested only on generalisation to **held-out episodes of already-seen causes**, not to an
+  unseen cause — a probe trained without any `wrong_target` example has not been shown to find
+  one.
+- The probe is a plain logistic regression (`--hidden 0`), the boring first thing to try; not
+  tuned.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — this is a diagnostic, not a gate.
+
+### Next
+
+The decisive follow-up: does plugging the probe's held-out window into stage 2 + replay actually
+move RSR? `scripts/diagnose_window_probe.py`, forcing each episode to its own LOEO-predicted
+window from `ceiling-test-v2` (never that episode's own label), run the same way
+`diagnose_window_oracle.py` forces the ground-truth window — tagged as its own ungated
+experiment (`PROBE_WINDOW`, absent from `configs/search.yaml:experiments`) so `verify_g3.py`
+cannot pick it up. That is the next thing this session runs.
+
+Promoting this into the registered stage 1 (a SPEC.md §5 change) is explicitly the user's call
+per this file's 2026-08-06 entry and CLAUDE.md, and is not done regardless of what the
+replay-verified diagnostic shows.
+
+---
+
+## 2026-08-10 — Probe window, replayed: window quality raises the ceiling but does not close the search-vs-random gap; stage 2 confirmed as the persistent bottleneck
+
+`scripts/diagnose_window_probe.py`, run `p35-probe-window` (search) → `p35-probe-window-replay`
+(336 replays, 5150.7 s, 15.33 s/replay, completed in one pass). Tagged `PROBE_WINDOW`, absent
+from `configs/search.yaml:experiments`, so `verify_g3.py:gated_rows` cannot score it — this is a
+diagnostic, analysed by hand with the same frozen `bootstrap_rsr_difference` the gate itself
+uses (never reimplemented), the way the `ORACLE` runs were reported on 2026-08-05/06. **These
+are real replayed numbers (I2 holds — every one came from the simulator) but not a C1 result:**
+the window is a leave-one-episode-out probe prediction, not the registered stage 1.
+
+### The comparison
+
+All 56 injected task-0 failures, K=8, each forced to the window `ceiling-test-v2`'s probe
+predicted for it (never that episode's own label).
+
+| λ | RSR search | RSR random_perturb | diff | 95% CI | excludes 0 |
+|---|---|---|---|---|---|
+| 0.01 | 0.268 | 0.321 | −0.054 | [−0.161, +0.054] | no |
+| 0.1 | 0.214 | 0.339 | −0.125 | [−0.250, +0.000] | no |
+| 1.0 | 0.304 | 0.357 | −0.054 | [−0.125, +0.018] | no |
+
+**Search does not beat random_perturb here either** — third window regime, same conclusion.
+
+### But window quality clearly moves the absolute rate — a clean dose-response
+
+| window source | window IoU (mean) | RSR search | RSR random_perturb |
+|---|---|---|---|
+| divergence heuristic (`p3-replay-RD`, stage1_top1) | 0.035 | 0.00–0.10 | — |
+| **probe prediction (this run)** | **0.236** | **0.21–0.36** | **0.32–0.36** |
+| ground truth (`p3-oracle56-replay`) | 1.0 | 0.375–0.536 | 0.393–0.411 |
+
+Both arms rise together with window quality — `random_perturb` is evaluated at the same forced
+window, so it benefits exactly as much as `search` does. This is why a much better window
+(0.035 → 0.236 mean IoU, a ~6.7x improvement) raises outcomes substantially without closing the
+relative gap: the gap is stage 2's, and stage 2 does not care how the window got chosen.
+
+### Per-cause split at λ=0.01 — stage 2 wins on one cause, loses badly on two
+
+| cause | RSR search | RSR random_perturb |
+|---|---|---|
+| early_release | 0.071 (1/14) | 0.071 (1/14) |
+| grasp_offset | **0.429 (6/14)** | 0.286 (4/14) |
+| mistimed_close | 0.571 (8/14) | **0.857 (12/14)** |
+| wrong_target | 0.000 (0/14) | **0.071 (1/14)** |
+
+`grasp_offset` is the one cause where the search wins outright with a good window — worth
+noting since `grasp_offset` is also where the ceiling test's probe made its largest localisation
+gain (IoU 0.016→0.259). `mistimed_close` and `wrong_target` both go the other way, sharply:
+CEM is not merely failing to help there, it is finding edits that replay *worse* than a
+magnitude-matched random one, with a window now good enough that this can't be blamed on stage
+1. `early_release` stays tied and low regardless of window quality.
+
+### Reading
+
+- **Stage 2 is now confirmed as the dominant, persistent bottleneck across three independent
+  window-quality regimes** (heuristic, probe, ground truth) — this was suspected after the
+  2026-08-06 window-oracle ablation (search barely beat random even at the true window) but that
+  was one regime at n=56. This adds a second, independently-windowed n=56 regime pointing the
+  same way, plus a dose-response relationship between window quality and absolute RSR that has
+  no other easy explanation.
+- **This is not proof that no positive result is reachable** — `grasp_offset` beating random at
+  a good window is a real, if small (n=14, not CI-resolved), positive signal that stage 2 is not
+  uniformly broken, and it lines up with the earlier finding that CEM-best beats random at
+  *matched magnitude* (2026-08-06, `p3-bank`, +0.14–0.16, also not CI-clean). It is evidence that
+  the objective carries *some* real signal for at least one cause, consistent with the 62–67%
+  pairwise ranking accuracy already measured — just not enough, and actively harmful for two of
+  the four causes.
+- **Fixing stage 1 alone will not produce a world model that consistently fixes policy
+  mistakes.** The next lever, if this line of work continues, has to target stage 2's objective
+  or optimiser directly, not window selection.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — diagnostic only, no gate re-run.
+
+### Next
+
+CLAUDE.md's "Q as critic" idea — fit `f(z_t, a_candidate) → P(success)` by supervised learning
+on already-replayed (edit, outcome) pairs, Monte-Carlo rather than TD, no bootstrapping — is the
+natural next target now that stage 2 (not stage 1) is the confirmed bottleneck. There is
+materially more labelled replay data to train and screen it against than when that idea was
+first analysed: `p3-bank-replay`, `p3-oracle56-replay`, `p3-replay-RD`, and now
+`p35-probe-window-replay` together hold well over a thousand real (edit → replayed outcome)
+pairs. Per CLAUDE.md's own discipline, screen it with `diagnose_objective_quality.py`-style
+ranking accuracy against this existing data — zero new simulation — before spending any replay
+budget on it.
+
+---
+
+## 2026-08-10 — Critic screen: a learned P(success) clears the goal-distance objective's ranking accuracy, on 5x the data
+
+`scripts/diagnose_critic_quality.py`, run `critic-screen-v1`. **No new simulation** — every
+label is a real replayed outcome already on disk (`p3-bank-replay`, `p3-oracle56-replay`,
+`p35-probe-window-replay`; 1008 labelled candidates, 56 episodes, joined arm-agnostically so
+`no_edit`/`expert_oracle` rows count as training signal too). Reuses `train_probe`/`auroc`
+from `diagnose_fault_localization.py` and `ranking_quality` from `diagnose_objective_quality.py`
+rather than reimplementing either. Diagnostic only (CLAUDE.md rule 2): a ranking screen is not
+a replay success rate.
+
+### What it is
+
+`f(z_end) -> P(success)`, plain logistic regression on the pooled rollout endpoint (same
+`rollout_from_window` the existing objective already uses — no new model, no simulator), fit by
+Monte-Carlo supervised learning on the replayed outcome. Evaluated with grouped
+leave-one-episode-out, same discipline as the ceiling test: the critic never sees a held-out
+episode's own candidates.
+
+### Result
+
+| | pairwise accuracy | rank corr | n informative pairs |
+|---|---|---|---|
+| goal-distance, single model (reference, `p3-oracle56-replay` only) | 0.6211–0.6731 | −0.2003 | 52–256 |
+| goal-distance, 3-seed ensemble (reference) | 0.6680 | — | 256 |
+| **learned critic (this run, 3 banks)** | **0.711** | **−0.269** | **1232** |
+
+Pooled AUROC 0.689. Per-cause AUROC: early_release 0.806, mistimed_close 0.649, grasp_offset
+0.589, wrong_target 0.543 — early_release is easiest here too, the same pattern the ceiling
+test and the divergence heuristic both show, which is independent corroboration that this
+number is measuring something real rather than an artefact (CLAUDE.md: distrust a new metric
+until something independent agrees with it).
+
+**Caveat on the comparison:** the reference numbers were measured on `p3-oracle56-replay` alone
+(n≤256); this run pools three banks (n=1008, 1232 informative pairs) because more data was
+available by the time this ran. The comparison is favourable but not perfectly matched — noted
+rather than presented as identical conditions.
+
+### Reading
+
+By the project's own pre-stated rule ("only variants that improve the screen earn simulator
+time" — `diagnose_objective_quality.py`), this clears it: a real, if modest, margin on far more
+data than any previous screen in this project. That justifies *evaluating* whether it changes
+end-to-end RSR — it does not by itself establish that it will, since a ranking-accuracy gain of
+this size did not, in the goal-distance objective's own history, translate cleanly into a stage-2
+win (the existing objective's 62–67% accuracy was real signal that still lost to
+`random_perturb`).
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — diagnostic only.
+
+### Next — a design decision, not a routine step
+
+Integrating this into the real search+replay pipeline is a bigger commitment than anything else
+run today: it changes what stage 2 optimises against (or how it selects among CEM's candidates),
+costs another real replay run (~90 min at this project's measured rate), and — like the stage-1
+window-criterion question — touches SPEC.md §5. Three integration shapes were considered, not
+yet chosen:
+
+1. **Replace** `D(z_end, z_goal)` with `1 − P(success)` outright.
+2. **Blend** the two terms — reintroduces a tunable weight, which risks the exact "tuned to win"
+   trap CLAUDE.md rule 3 warns about unless swept as honestly as λ already is.
+3. **Re-rank only** — leave CEM's optimisation untouched, use the critic solely to pick among
+   candidates CEM already produces (`cem_best`, `elite_mean`, `iter1_best`, or `no_edit` as an
+   abstention option). Cheapest, lowest-risk, and directly answers two findings already on
+   record: "optimising harder makes it worse" (iter1 beat convergence, 2026-08-06) and `no_edit`
+   being a strong, hard-to-beat baseline (0.482 at the fault window) — both of which a
+   selection-only critic addresses without touching the optimiser at all.
+
+Not decided in this session; the user's call, same as the stage-1 promotion question.
+
+---
+
+## 2026-08-10 — Critic-as-objective, replayed: does not beat random_perturb at the standard window
+
+User chose "Replace the objective" outright (option 1 above). Built end to end:
+`cfe/search/cem.py` gained an optional `evaluate_fn` parameter (default unchanged, verified
+against the full existing `test_search_cem.py` suite unmodified — every prior caller is
+byte-identical); `cfe/search/critic.py` (new) implements `Critic`, `train_critic`,
+`evaluate_candidates_critic` (same interface as `evaluate_candidates`, `D` replaced by
+`1 - P(success)`), checkpoint save/load, and the training-data join shared with
+`diagnose_critic_quality.py`; `scripts/train_critic.py` fit the deployment checkpoint
+(`p35-critic`, 1008 candidates, 56 episodes) on 100% of the labelled data per
+`critic-screen-v1`'s validated recipe; `scripts/diagnose_critic_search.py` runs real CEM
+against it, **stage 1 held to the standard divergence heuristic on purpose**, to isolate the
+objective swap from the window question. `tests/test_critic.py` adds an analytic
+CEM-recovers-a-known-critic-optimum test, mirroring SPEC §8's reasoning: it isolates "does CEM
+correctly optimise against whatever it's given" from "is the critic any good," now that both a
+model AND a critic could independently be wrong.
+
+Run `p35-critic-search` → `p35-critic-search-replay` (336 replays, 5671.3 s, 16.88 s/replay).
+Tagged `CRITIC_OBJECTIVE`, absent from `configs/search.yaml:experiments`.
+
+| λ | RSR search | RSR random_perturb | diff | 95% CI | excludes 0 |
+|---|---|---|---|---|---|
+| 0.01 | 0.054 | 0.036 | +0.018 | [0.000, +0.054] | no |
+| 0.1 | 0.018 | 0.036 | −0.018 | [−0.054, +0.000] | no |
+| 1.0 | 0.054 | 0.018 | +0.036 | [0.000, +0.089] | no |
+
+**Does not beat `random_perturb` at any λ**, and the absolute rate (0.018–0.054 for search) is
+in the same low range as the original goal-distance objective measured at this identical window
+(`p3-replay-RD`: 0.00–0.10) — not clearly better, not clearly worse. Per-cause at λ=0.01 is
+near-uniform noise: 1/14 for three causes on both arms, 0/14 for `wrong_target` on both.
+
+### Reading
+
+- **This is a null result relative to the goal-distance objective, not a negative one relative
+  to a working method** — both objectives are low at this window, which is exactly what
+  2026-08-05's headroom analysis predicts: `stage1_top1`'s headroom (`expert_oracle - no_edit`)
+  is small to begin with, so no stage-2 change — better objective or not — has much room to
+  show a win there. This experiment could not have distinguished "the critic doesn't help" from
+  "nothing helps at a window this bad," and it doesn't.
+- **The screen (0.711 ranking accuracy) did not translate into a stage-2 win**, exactly as
+  flagged as a real possibility before this run: the original objective's 62–67% accuracy also
+  did not beat `random_perturb`. A ranking-accuracy improvement over an already-weak baseline
+  was evidently not enough margin to survive CEM driving candidates to the argmin — the same
+  "optimising harder exploits the model's error" dynamic already measured for the goal-distance
+  objective may equally apply to a learned one; this run cannot yet distinguish "the critic is
+  not good enough" from "argmin-style optimisation against **any** imperfect learned scorer
+  degrades this way."
+- **The untested combination is the one with a real prior**: the probe's window
+  (2026-08-10) raised absolute RSR to 0.21–0.36 using the *original* objective, purely by
+  having more headroom to work with. Whether the critic does better than goal-distance
+  specifically *at a good window, where there is headroom for a difference to show up*, is the
+  comparison this run does not answer and the oracle-window / probe-window results say is where
+  to look next.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — diagnostic only.
+
+### Next
+
+Combine the two individually-validated interventions: probe-predicted window (LOEO, never an
+episode's own label) **and** the critic objective, in one run. Neither has shown a clear win
+alone, and neither's pairing with the *other's* partner has either (critic at a bad window, just
+measured; goal-distance at a good window, already measured via `p35-probe-window-replay`). This
+is the last cheap combination of the pieces built today before concluding that the negative
+result is about argmin-style stage-2 optimisation itself, not about which window or which
+objective it is handed.
+
+---
+
+## 2026-08-10 — Combined (probe window + critic), replayed: still does not beat random_perturb, but the critic beats goal-distance at a matched window
+
+`scripts/diagnose_critic_probe_window.py`, run `p35-critic-probe-window` →
+`p35-critic-probe-window-replay` (336 replays, 5031.2 s, 14.97 s/replay). Both interventions at
+once: each episode forced to its own LOEO probe-predicted window (`ceiling-test-v2`, never that
+episode's own label), stage 2 scored by the critic (`p35-critic`). Tagged
+`CRITIC_PROBE_WINDOW`, ungated, same status as every diagnostic today.
+
+### Against random_perturb — still no
+
+| λ | RSR search | RSR random_perturb | diff | 95% CI | excludes 0 |
+|---|---|---|---|---|---|
+| 0.01 | 0.321 | 0.375 | −0.054 | [−0.125, +0.000] | no |
+| 0.1 | 0.339 | 0.321 | +0.018 | [−0.071, +0.107] | no |
+| 1.0 | 0.321 | 0.321 | +0.000 | [−0.054, +0.054] | no |
+
+Fourth independent n=56 test today (heuristic window/goal-distance; probe window/goal-distance;
+heuristic window/critic; probe window/critic) and the fourth to not exclude zero at every λ.
+
+### But a fifth, post-hoc cut the existing data answers for free: critic vs goal-distance, matched window
+
+Both `p35-probe-window-replay` (goal-distance) and this run share the *same* probe windows on
+the *same* 56 episodes — a paired comparison isolates the objective alone, with no simulator:
+
+| λ | RSR critic | RSR goal-distance | diff | 95% CI | excludes 0 |
+|---|---|---|---|---|---|
+| 0.01 | 0.321 | 0.268 | +0.054 | [−0.054, +0.161] | no |
+| 0.1 | 0.339 | 0.214 | **+0.125** | **[+0.018, +0.232]** | **YES** |
+| 1.0 | 0.321 | 0.304 | +0.018 | [−0.054, +0.089] | no |
+
+**The critic beats the hand-written objective, at a matched window, with a CI excluding zero at
+λ=0.1.** Positive at all three λ, significant at one. This is real: not a replay-bug artefact
+(`no_edit`/`expert_oracle` at these windows are unaffected — this compares two `search` arms
+only) and not attributable to the window (identical windows, identical episodes, paired).
+
+### Reading — precise about what this is and is not
+
+- **Not a C1 result and not I4-clean.** SPEC.md §6: "a method that wins only at one λ has not
+  won." The critic-vs-goal-distance margin clears that bar at exactly one of three λ. It is
+  real evidence the critic is doing something better than the hand-written distance, not
+  evidence the critic is *validated*.
+- **Not a win against `random_perturb`**, which is the bar that actually matters (CLAUDE.md:
+  "the baseline that decides whether the world model contributes anything"). Beating a weaker
+  objective is not the same claim as beating chance.
+- **Window quality remains the dominant lever; objective choice is a real but secondary,
+  partial effect on top of it.** Ordered by absolute search RSR at K=8, λ=0.01: heuristic window
+  ~0.00–0.10 (either objective) < probe window + goal-distance 0.268 < probe window + critic
+  0.321 < ground-truth window 0.375–0.536. Each intervention adds something; none is sufficient
+  alone or in combination to durably clear `random_perturb`.
+- **Four n=56 replayed tests today, zero excluding zero against `random_perturb`, across two
+  independently-varied axes (window source, objective).** This is the same shape of evidence
+  the 2026-08-06 window-oracle ablation produced at n=56 after n=10 pointed the wrong way — the
+  sample size this time was n=56 from the start in every test, so there is no small-n flip left
+  to worry about here.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — every run today is diagnostic.
+
+### Next
+
+This is the last cheap combination of the pieces built today. Per SPEC.md §0's own stated
+fallback ("a negative result about world-model fidelity... should be written up as such"), the
+honest reading of today's four replayed tests plus the paired fifth comparison is that
+argmin-style CEM optimisation is the durable bottleneck — not the window, not this particular
+objective — and that conclusion has now been tested across more independent axes (window source
+× objective, all at n=56) than any prior point in the project. Two threads remain open, neither
+attempted today: whether the critic generalises to an unseen injected cause (it has only been
+asked about causes it saw at least one example of), and whether a non-argmin selection among
+CEM's own candidates (the "re-rank only" option not chosen this session) behaves differently
+from driving optimisation all the way to convergence against either objective. Both are the
+user's call, same as every promotion decision recorded today.
+
+---
+
+## 2026-08-10 — Does more data help? Yes, for localisation, cheaply confirmed; untested for stage 2
+
+User asked directly: pretrained world model, a more popular environment, or more data? Pretrained
+world model was already rejected for compute reasons (SPEC.md's V-JEPA 2-AC deviation note — a
+rented A100-class GPU and an 8 GB consumer card, not H200-class sustained access); a new
+environment is the highest-cost option and orthogonal to the diagnosed problem (redoes Phases
+0-3, invalidates the whole empirical record built today). More data was recommended as the
+best-grounded option, with a cheap version (more injected diversity within task 0, no new task/
+BC policy/gate needed) tried first before committing to the expensive version (the task 1/2
+expansion CLAUDE.md already names as queued and stalled).
+
+### What was done
+
+`scripts/build_failure_set.py --task-id 0 --per-cause 40` (up from the pinned default 14, via
+the existing `--per-cause` CLI override — `configs/search.yaml`'s checked-in `14` is left
+untouched, since it is deliberately sized for the eventual 3-task plan, `14x3=42`). Task 0 has
+48 cached demos, so this uses nearly all of them instead of 14. Run `p35-failures-t0-expanded`:
+104 new injected failures written (220 candidates attempted, 116 absorbed and still succeeded —
+recorded, excluded, not a failure). Task-0 injected failure set: 56 -> **160** (40/cause).
+2270.1 s.
+
+Then `diagnose_fault_localization.py` (the ceiling test) re-run on all 160 — **pure GPU, no
+simulator, no new replay** — to see whether the larger, more diverse episode pool improves the
+LOEO probe's generalisation, which is exactly what "more data" would be expected to help if the
+2026-08-10 localisation finding is real and not a fluke of a small sample.
+
+### Result: every non-trivial cause improved
+
+| | n=56 (`ceiling-test-v2`) | n=160 (`ceiling-test-v3-expanded`) |
+|---|---|---|
+| Part 2 pooled mean IoU | 0.236 | **0.263** |
+| Part 2 pooled AUROC | 0.880 | **0.905** |
+| grasp_offset IoU | 0.259 | 0.292 |
+| mistimed_close IoU | 0.139 | 0.181 |
+| wrong_target IoU | 0.361 | 0.389 |
+| early_release IoU | 0.186 | 0.190 (flat — already easy) |
+| Part 3 position-only control | 0.000 / AUROC 0.484 | 0.000 / AUROC 0.484 (unchanged) |
+
+Part 3's control stayed at chance at the larger scale too — the gain is still attributable to
+latent content, not a timing prior resurfacing with more episodes to memorise timing from. Part
+1 (oracle pairwise divergence, no learning) is essentially unchanged (0.0507 vs 0.0508), as
+expected: it does not generalise across episodes, so more episodes only sharpens the estimate
+of the same population value rather than improving it.
+
+### Reading
+
+- **A real, if modest, "more data helps" signal for localisation** — 2.86x more episodes from
+  the *same* task and demo pool, no new environment, no new BC policy, no new gates, and every
+  non-trivial cause improved. This is the cheapest possible version of "more data" and it
+  worked, which is evidence (not proof) that the more expensive version — the task 1/2
+  expansion — would help further.
+- **Untested: whether this translates to stage 2.** Growing the *critic's* training pool needs
+  these 104 new episodes actually searched and replayed, which is real simulator time (the same
+  ~90-minute order of magnitude as every other replay run today) — not run yet. The localisation
+  result is suggestive but does not by itself predict a stage-2 outcome any more than the
+  original ranking-accuracy screen predicted today's replayed results did.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — diagnostic and data-generation
+only, no gate re-run.
+
+### Next
+
+Extending "more data" to stage 2 (search + replay on the 104 new episodes, retrain the critic
+on the larger pool, re-screen, and only then re-test end to end) is the natural continuation and
+is not yet done. It is another real replay commitment at today's established scale. Whether to
+spend it, versus writing up today's findings, versus one of the other open threads
+(re-rank-only selection, unseen-cause generalisation), is the user's call.
+
+---
+
+## 2026-08-10 — Extending "more data" to stage 2: does not clear the screen, no further replay spent
+
+User chose to extend the more-data experiment to stage 2. `scripts/diagnose_window_probe.py`
+gained `--exclude-run` (skip any failure_id already covered by a given prior run — reusable for
+any future "test on genuinely new episodes" need) and a fix: its `NOT_A_RESULT` banner
+hard-coded `ceiling-test-v2` regardless of which `--probe-run` was actually used. The one
+already-written run this bug affects, `p35-probe-window-newdata`, has the stale string baked
+into its stored `not_a_result` field — its `probe_run` field is correct
+(`ceiling-test-v3-expanded`) and the actual window data came from the right source; only the
+descriptive banner text was wrong. Not corrected retroactively (results are not edited after
+the fact); noted here so a future reader of that run's raw files isn't misled by the banner.
+
+### What was done
+
+50 of the 104 new episodes (stratified by cause, excluded from all three existing critic-
+training banks via `--exclude-run p35-probe-window-replay`), searched at their fresh
+`ceiling-test-v3-expanded` LOEO windows and replayed: `p35-probe-window-newdata` ->
+`p35-probe-window-newdata-replay` (300 replays, 4610.6 s, 15.37 s/replay). Screened immediately
+via `diagnose_critic_quality.py --banks p3-bank-replay p3-oracle56-replay
+p35-probe-window-replay p35-probe-window-newdata-replay` — no new training or replay beyond
+this — before deciding whether retraining the deployment critic was justified.
+
+### Result: mixed, and the primary metric went the wrong way
+
+| | n=56, 1008 candidates (`critic-screen-v1`) | n=106, 1308 candidates (`critic-screen-v3-moredata`) |
+|---|---|---|
+| Pairwise accuracy (within-episode) | 0.711 | **0.698** |
+| Rank correlation (within-episode) | −0.269 | −0.227 (weaker) |
+| Pooled AUROC (NOT within-episode) | 0.689 | 0.752 |
+
+Per-cause AUROC also mixed: `grasp_offset` 0.589->0.694 and `mistimed_close` 0.649->0.681
+improved; `wrong_target` 0.543->0.528 slipped; `early_release` flat.
+
+### Reading
+
+- **Unlike localisation, this is not a clean "more data helps."** The two within-episode metrics
+  — the ones `diagnose_objective_quality.py`'s own docstring designates primary, specifically
+  because pooling across episodes "conflates 'this episode was easy' with 'this edit was good'"
+  — both moved slightly the wrong way. The metric that improved (pooled AUROC) is exactly the
+  one susceptible to that confound.
+- **This does not clear the project's own pre-stated bar for spending more replay budget**
+  (`diagnose_objective_quality.py`: "only variants that improve the screen earn simulator
+  time"). Retraining the deployment checkpoint and running another ~90-minute end-to-end test on
+  a critic the primary screen does not support would be exactly the kind of ungrounded next
+  step CLAUDE.md's rigor culture warns against — so it was not done.
+- **A plausible reading, not confirmed:** 56-106 episodes may simply be too small a jump, or too
+  heterogeneous a mix (candidates from `p3-bank-replay`'s diverse-optimisation-pressure design,
+  the true-window oracle, and two different probe-window generations) for a linear probe to
+  extract a cleaner signal from — as opposed to localisation, where every episode contributed
+  the same clean signal (a labelled fault window). This is not established, only plausible.
+- **Localisation and stage-2 critic quality are evidently not the same question with the same
+  answer.** More data cheaply, clearly improved one and did not clearly improve the other. That
+  is itself worth knowing before assuming a large data investment (the task 1/2 expansion) would
+  fix stage 2.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged.
+
+### Next
+
+The cheap and medium versions of "more data" have now both been tried on the critic: the
+original 3-bank pool (56 episodes) and this 4-bank pool (106 episodes). Neither has produced a
+result that beats `random_perturb`, and the larger pool did not even clearly beat the smaller
+pool's own ranking screen. Remaining open threads, none attempted: the full task 1/2 expansion
+(a qualitatively larger and more diverse data source than more within-task-0 episodes, and a
+multi-day commitment); re-rank-only critic integration; unseen-cause generalisation. All the
+user's call.
+
+---
+
+## 2026-08-10 — Re-rank-only, at zero new simulation: the first search result all session to beat random_perturb with a CI excluding zero
+
+The one remaining critic-integration option from the original three-way choice, and the cheapest
+possible way to test it: `p3-bank-replay` already holds real replayed outcomes for four
+candidates per episode at the **ground-truth** window — `no_edit` (`identity`), `cem_best`
+(today's method), `cem_elite_mean`, and `cem_iter1_best` — from the 2026-08-06 exploitation
+test. If the critic's job is only to *choose* among candidates CEM already produces, rather than
+drive optimisation itself, every outcome needed already exists on disk. No simulator, no new
+training run past a checkpoint fix.
+
+### A correctness bug caught before trusting anything
+
+`cfe/search/critic.py`'s `load_labelled_candidates` didn't preserve which of `p3-bank-replay`'s
+six candidate variants a joined row came from (needed because `cem_best`/`cem_elite_mean`/
+`cem_iter1_best` share `(failure_id, arm, window_start)` and only `window_source` tells them
+apart) — added, plus the matching field in `diagnose_critic_quality.py`'s scored output
+(`tests/test_critic.py` gained a test for the propagation). The first version of the follow-up
+analysis script picked the argmax candidate with Python's `max(a_set, key=...)`, which is
+non-deterministic across process runs whenever two candidates tie on `critic_prob` — which
+happens whenever CEM's optimum **is** the identity edit, making `cem_best`'s actions (and
+therefore its rolled-out `critic_prob`) bit-identical to `no_edit`'s. Two runs produced
+different aggregate numbers (0.643 vs 0.625) before this was caught. Fixed with a fixed
+priority order for tie-breaking, mirroring `cfe/search/windows.py:_top`'s discipline; confirmed
+identical across three subsequent runs before anything below was trusted.
+
+### Result
+
+n=56, ground-truth window (oracle-assisted — see caveats), critic scores are honest
+leave-one-episode-out (`critic-screen-v4-tagged`, never an episode's own label at scoring time):
+
+| strategy | RSR |
+|---|---|
+| always `no_edit` (abstain) | 0.482 |
+| always `cem_elite_mean` | 0.518 |
+| always `cem_best` (**today's method**) | 0.536 |
+| always `cem_iter1_best` | 0.589 |
+| **critic re-rank among all four** | **0.643** |
+
+| comparison | diff | 95% CI | excludes 0 |
+|---|---|---|---|
+| re-rank vs always-`cem_best` | +0.107 | [+0.036, +0.196] | **YES** |
+| re-rank vs `random_perturb` (seed 0) | +0.250 | [+0.107, +0.393] | **YES** |
+| re-rank vs `random_perturb` (seed 1) | +0.268 | [+0.125, +0.429] | **YES** |
+| [reference] always-`cem_best` vs `random_perturb` (seed 0) | +0.143 | [−0.036, +0.321] | no |
+| [reference] always-`cem_best` vs `random_perturb` (seed 1) | +0.161 | [−0.018, +0.339] | no |
+
+**McNemar cross-check** (re-rank vs always-`cem_best`, paired): 6 episodes flipped fail→success,
+**0** flipped success→fail, 50 unchanged. chi2=4.167, p≈0.041. One-directional — no case where
+re-rank made an episode worse.
+
+This is the first search configuration all session — and, as far as this file's record goes,
+the first in the project — to beat `random_perturb` with a CI excluding zero, independently
+corroborated by a paired test. Re-rank chose something other than `cem_best` in 33/56 episodes.
+
+### Caveats — precise about what this is and is not
+
+- **Ground-truth window, same status as every oracle result in this project.** This is exactly
+  as oracle-assisted as `p3-oracle56-replay` was: the method does not have this window at
+  deployment. It answers "given a good window, does critic-guided selection among CEM's own
+  candidates beat blind argmin and beat chance" — yes — but not yet "does the full deployable
+  pipeline win."
+- **Not yet combined with the probe window.** `p35-probe-window-replay` only has the single
+  `cem_best`-equivalent candidate at the probe window, not the elite_mean/iter1_best diversity
+  `p3-bank-replay` has at the ground-truth window. Testing probe window + re-rank together needs
+  a genuinely new search (bank-mode CEM at the probe window) and replay — real simulator time,
+  not free like this analysis was.
+- **n=56, one measurement.** This project has one prior example of an n=10 result reading
+  positive and not surviving n=56 (2026-08-06). This is already at n=56, not the underpowered
+  regime that flip came from, and it now has three independent forms of support (bootstrap CI,
+  McNemar, and a one-directional fixed/broke split) rather than one — but it is still a single
+  measurement at a fixed window, not yet replicated on an independent episode set.
+- **Not yet promoted.** Same status as every method question this session: a SPEC.md §5 change,
+  the user's call, regardless of how this reads.
+
+### Reading
+
+Today's diagnosis said stage 2 was the durable bottleneck because argmin optimisation exploits
+the model's own errors (iteration 1 beating full convergence, 2026-08-06). Re-rank selection is
+the direct, structural answer to exactly that mechanism: it never asks CEM to converge past what
+a critic judges useful, and it can abstain via `no_edit` when nothing CEM produced is trustworthy.
+That it beats every fixed "always X" strategy — not just `cem_best` — and does so with zero
+observed downside (McNemar's 6/0 split) is the strongest evidence yet that the exploitation
+problem is addressable without a better dynamics model or a fundamentally different optimiser.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged — oracle-window diagnostic, not a
+gate re-run, not a C1 result.
+
+### Next
+
+The obvious, highest-value remaining experiment: bank-mode CEM (the same 4-candidate diversity
+used here) at the **probe window** instead of the ground-truth window, replayed, then re-rank
+selection applied — the first fully deployable-shaped pipeline (no oracle information anywhere)
+that this specific combination has not yet tested. Real simulator time, ~90-minute scale. The
+user's call whether to spend it now.
+
+---
+
+## 2026-08-11 — The fully deployable pipeline, replayed: re-rank's win does not survive removing the oracle window
+
+User approved the combined test. `scripts/diagnose_critic_rerank_probe_window.py` (new):
+probe-predicted window (LOEO, `ceiling-test-v2`, never that episode's own label) + the same
+four-candidate bank (`no_edit`/`cem_best`/`cem_elite_mean`/`cem_iter1_best`) generated by the
+**unchanged** standard CEM, scored by the critic, only the argmax candidate replayed — plus a
+magnitude-matched `random_perturb`. Cheaper than a naive bank-mode run by design: a deployed
+method only executes one candidate, so there was no reason to replay all four.
+
+**A selection bug caught before this ran for real.** The failure set grew 56→160 injected
+(2026-08-10's more-data experiment) before this script's first run; `select_failures` on the
+now-larger pool silently picked a different, mostly-uncovered 56 than `ceiling-test-v2`'s
+predictions exist for (29/56 skipped, "no probe prediction"). Fixed by restricting to
+`ceiling-test-v2`-covered episodes *before* stratified selection, re-run cleanly (56/56, 112
+edits) before any replay.
+
+### Result: does not beat random_perturb
+
+Run `p35-critic-rerank-probe-window-v2` → `-replay` (112 replays, 1693.7 s, 15.12 s/replay).
+
+| | RSR |
+|---|---|
+| critic re-rank @ probe window | 0.357 |
+| `random_perturb` (matched magnitude) | 0.321 |
+
+diff = +0.036, 95% CI [−0.036, +0.107] — **does not exclude zero.** McNemar cross-check: 3
+episodes flipped fail→success, 1 flipped success→fail (n=4 flips total) — nothing like the
+oracle window's clean, one-directional 6-fixed/0-broke split.
+
+Per-cause: `wrong_target` stayed at 0/14 for both arms; `mistimed_close` favoured random
+(0.714 vs 0.786); `grasp_offset` and `early_release` favoured search slightly. Selected-candidate
+breakdown: `identity` (abstain) was picked 19/56 times and scored 0.474 on its own — the single
+best-performing bucket — ahead of `cem_best` (0.421, 19/56 picks), `cem_iter1_best` (0.182,
+11/56), `cem_elite_mean` (0.143, 7/56).
+
+### Reading
+
+- **The oracle-window re-rank win does not transfer to the deployable window.** Same critic,
+  same candidate-generation mechanism, same selection logic — the only thing that changed is
+  where the window came from, and the effect that excluded zero at the ground-truth window
+  (diff +0.107 vs always-`cem_best`, +0.25–0.27 vs random) shrinks to something indistinguishable
+  from noise once the window is only probe-predicted.
+- **This says the earlier win was substantially about having a good window to select among, not
+  just about selection quality.** Re-rank is a real, secondary effect on top of window quality —
+  not a substitute for it. This is consistent with every window-quality comparison this session:
+  absolute RSR tracks window source (heuristic < probe < ground truth) far more than it tracks
+  which stage-2 strategy is used at a fixed window.
+- **`identity` (abstaining) being the single best-scoring bucket is itself informative.** At a
+  window that is often wrong, the safest real move is frequently to not edit there at all — which
+  is exactly what a window-uncertain critic *should* learn, and is a coherent, non-arbitrary
+  finding rather than a null one.
+- **The comprehensive picture, this configuration now included:** every deployable-window
+  combination tried this session — divergence heuristic × goal-distance, divergence heuristic ×
+  critic-replace, probe window × goal-distance, probe window × critic-replace, probe window ×
+  critic-re-rank — has failed to beat `random_perturb` with a CI excluding zero. The **only**
+  combination that did was ground-truth window × critic-re-rank, which is exactly the one
+  ingredient no deployable method has. That localises the remaining gap precisely: window
+  quality, not the stage-2 selection mechanism, which this session has now shown *can* work
+  given a good enough window.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged.
+
+### Next
+
+Six independent deployable-window configurations, zero wins. The evidence base for "the world
+model, at its current window-localisation quality, cannot consistently fix policy mistakes
+without oracle assistance" is now about as thorough as this project's resources support without
+either (a) a materially better window-localisation method than the LOEO probe already built, or
+(b) the multi-day task 1/2 expansion. Whether either is worth pursuing further, or whether this
+is the point to write up the negative result per SPEC.md §0, is the user's call.
+
+---
+
+## 2026-08-11 — Two more cheap improvements tried, neither moves the result: the readily-available levers are exhausted
+
+User set a stricter goal (beat random without oracle assistance, no "or prove impossible"
+escape clause) and the session continued autonomously per that directive. Two more concrete,
+already-partially-validated ideas were tried before concluding the cheap-lever space is used up.
+
+### Attempt 1 — the already-better probe, retested end to end
+
+`p35-critic-rerank-probe-window-v2` (previous entry) used `ceiling-test-v2`'s windows (56
+episodes, IoU 0.236). `ceiling-test-v3-expanded` (2026-08-10, 160 episodes) has measurably
+*better* localisation (IoU 0.263, AUROC 0.905 vs 0.880) and was sitting unused. Re-ran the
+identical deployable pipeline with `--probe-run ceiling-test-v3-expanded`:
+`p35-critic-rerank-probe-window-v3` → `-replay` (112 replays, 1743.5 s). Confirmed the two runs
+drew different episode subsets from the now-160-episode pool (27/56 overlap) before trusting
+anything — the identical-looking headline numbers between v2 and v3 were briefly suspicious and
+turned out to be coincidental rounding, not a bug.
+
+**Result: search 0.304 vs random 0.268, diff +0.036, CI [−0.036, +0.107] — same non-result.**
+A ~0.03 IoU improvement in the window predictor did not move the deployable pipeline's outcome
+at all. Both arms' absolute rates were, if anything, slightly lower than the v2 run's (plausibly
+a harder episode subset, not necessarily the probe's fault) — the diff and McNemar counts (3
+fixed / 1 broke) came out numerically identical to v2's by coincidence, on a materially
+different set of episodes.
+
+### Attempt 2 — seed-ensembling the localisation probe (screened, no replay)
+
+`diagnose_fault_localization.py` gained `--n-seeds` (default 1, bit-identical to every prior
+run — verified: `ceiling-test-v4-regression-check` at `--n-seeds 1` reproduced
+`ceiling-test-v3-expanded`'s numbers exactly, `part2_loeo_classifier` dict equal down to the
+float). At `--n-seeds 5` each LOEO fold trains 5 independently-seeded probes and averages their
+*probabilities* (not standardise-then-average like `cfe/search/ensemble.py` — probabilities
+already share a `[0, 1]` scale, so there is no cross-model scale mismatch to correct for). This
+mirrors the dynamics-model seed-ensembling that measurably helped the search objective
+(2026-08-06: pairwise accuracy 0.621→0.668, McNemar p=0.023) — never before applied to the
+localisation probe.
+
+**Result: mixed, not a clean win.**
+
+| | single-seed (`ceiling-test-v3-expanded`) | 5-seed ensemble (`ceiling-test-v5-ensemble5`) |
+|---|---|---|
+| pooled mean IoU | 0.2632 | 0.2607 (slightly worse) |
+| pooled median IoU | 0.2517 | 0.2727 |
+| pooled AUROC | 0.9047 | 0.9222 |
+| grasp_offset IoU | 0.292 | 0.323 |
+| mistimed_close IoU | 0.181 | **0.126** (regressed) |
+| wrong_target IoU | 0.389 | 0.398 |
+
+Mean IoU — the metric that most directly measures what actually feeds the deployable pipeline
+(where the top-1 window ends up) — did not improve. AUROC improved, but AUROC does not
+determine which single window gets selected; IoU does. `mistimed_close` regressed materially.
+Per this project's own repeated discipline (only spend replay budget on a variant that clears
+its screen), this was **not** taken to another end-to-end replay test.
+
+### Reading
+
+Three independent, well-motivated, low-cost improvement attempts this session — more critic
+training data, a better single localisation probe, and probe seed-ensembling — and **none**
+moved the deployable-pipeline result. This is a materially stronger negative case than a single
+null result: it says the gap is not sitting just behind an easy, cheap fix of the kind tried so
+far. What remains untried is qualitatively different in cost or kind: the full task 1/2 data
+expansion (multi-day), or a genuinely different method (not a variant of what exists).
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged.
+
+### Where this leaves the session's goal
+
+Eight independent replayed tests of deployable (non-oracle) configurations across window source
+× stage-2 strategy, plus two further cheap-improvement attempts screened without replay — zero
+have beaten `random_perturb` with a confidence interval excluding zero. The one configuration
+that did (ground-truth window × critic re-rank) is oracle-assisted by construction and cannot be
+deployed. The readily-available, resource-cheap avenues from this session's own infrastructure
+are exhausted; continuing to iterate on them without a new idea would not change this
+conclusion. What would change it is out of scope for further autonomous work this session: the
+multi-day task 1/2 expansion, or a method not yet conceived.
+
+---
+
+## 2026-08-11 — One genuinely new combination tried: ensemble-driven CEM generation. Changes the process, not the result.
+
+Not a re-tuning of something that already failed: `cfe/search/ensemble.py` (Phase 3.5) has only
+ever been used to *score* already-generated candidates in this project (`diagnose_objective_
+quality.py`, `diagnose_critic_quality.py`) — never to *drive* the CEM optimisation that
+generates them, despite measurably beating the single model at ranking (PROGRESS.md 2026-08-06:
+0.668 vs 0.62–0.67 pairwise accuracy, McNemar p=0.023). `scripts/diagnose_ensemble_rerank_
+probe_window.py` (new) combines it with the best available probe window
+(`ceiling-test-v3-expanded`) and critic re-rank selection, all three independently-validated
+pieces at once. `cem_search`'s `evaluate_fn` parameter (added for the critic) accepted
+`evaluate_candidates_ensemble` with no adapter needed — confirmed first that all four ensemble
+members (`p2-dyn-res`, `p35-seed{1,2,3}`) share identical configs (`reduction=grid4,
+k_context=4, horizon=8, residual=True`), so one `SearchProblem` per episode is valid for all.
+
+### Result
+
+Run `p35-ensemble-rerank-probe-window` → `-replay` (112 replays, 1737.0 s). **RSR search =
+0.304, random = 0.268, diff +0.036, CI [−0.036, +0.107] — does not exclude zero.** Same
+non-result as every other probe-window configuration.
+
+**But the search process genuinely changed.** Same 56 episodes as `p35-critic-rerank-probe-
+window-v3` (both draw deterministically from the same `ceiling-test-v3-expanded`-covered pool,
+same seed, same stratification — confirmed identical episode sets before reading anything into
+the coincidence). The ensemble objective picked a *different* bank candidate than the
+single-model run in 26/56 episodes — real, substantial disagreement about which edit looks
+best. Despite that, the final replayed outcome differed in only 2/56 episodes, one flipping
+fail→success and one flipping success→fail, netting to zero aggregate change — which is also
+why the headline RSR numbers came out numerically identical to the single-model run (a
+coincidence checked and explained, not assumed).
+
+### Reading
+
+- **Changing what drives stage-2 generation (single model vs. validated-better ensemble)
+  reshuffles which candidate looks best without changing how many episodes get rescued.** This
+  is a cleaner, more direct piece of evidence than the earlier null results that the bottleneck
+  really is upstream of stage 2's specific mechanics — consistent with, and now further
+  reinforcing, everything else this session found about window quality dominating.
+  Sophistication added to the *scoring/generation* side, whether via a learned critic or a
+  validated multi-model ensemble, keeps landing on the same ceiling once the window is only
+  probe-predicted rather than exact.
+- **Six distinct methodological ideas tried this session, all at the deployable (non-oracle)
+  window, all null:** more critic training data, a better single localisation probe, probe
+  seed-ensembling, critic-as-objective, critic-as-reranker, and now ensemble-driven candidate
+  generation. Each was individually well-motivated — several had direct prior validation
+  elsewhere in this exact project — and none closed the gap to `random_perturb`.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged.
+
+### Assessment
+
+This session's readily-available, resource-proportionate technique space — the combinations of
+{window source} × {stage-2 strategy} × {single model, more data, ensembling} that this
+project's existing infrastructure supports — is exhausted. Nine independent replayed
+non-oracle configurations, zero wins; the only win requires the ground-truth window. Further
+autonomous iteration within this same space would be searching where the light already is, not
+where the evidence points. What remains is qualitatively different in kind or cost: the
+multi-day task 1/2 data expansion, or a method not yet conceived — both squarely the user's
+call, not a default to keep making unilaterally.
+
+---
+
+## 2026-08-11 — Top-M probe windows: the cleanest demonstration yet that window quality, not edit choice, is the whole story
+
+One thing genuinely hadn't been tried: SPEC.md §5 always specified stage 1 as "rank
+candidates... keep the top `M` for stage 2." Every probe-window pipeline this session used only
+the single best-predicted window (M=1) — a simplification made when the ceiling test was first
+built, not a deliberate choice. `top_m_windows` (new, alongside the untouched `top_window`) and
+`--top-m` (new, default 1, additive `found_windows` field only — verified bit-identical to
+`ceiling-test-v3-expanded` at default settings before trusting anything) restore the M>1
+version.
+
+**Screened for free first.** `ceiling-test-v6-topm3` (`--top-m 3`): mean IoU of the single top-1
+window is 0.263, but the *best* of the top-3 per episode averages 0.309 (median 0.4 vs 0.252) —
+the true fault window is often captured somewhere in the top-3 even when top-1 misses it. Worth
+testing whether a deployable selector (the critic, no oracle access to which of the 3 is
+actually good) can find it.
+
+### Mechanism and result
+
+`scripts/diagnose_critic_topm_probe_window.py` (new): bank-mode CEM at *each* of the 3
+probe-predicted windows (M×4 = 12 candidates/episode), critic-scores all of them, selects the
+single global best across windows and candidate types. Run `p35-critic-topm-probe-window` →
+`-replay` (112 replays, 1673.2 s). The critic **genuinely used the extra windows** — rank
+histogram: window-rank 0 (top-1) selected 22/56, rank 1 selected 18/56, rank 2 selected 16/56 —
+more than 60% of the time it picked something other than the top probe prediction.
+
+| | RSR |
+|---|---|
+| critic + top-3 windows | **0.375** |
+| `random_perturb` (same selected window) | **0.393** |
+
+diff = −0.018, 95% CI [−0.071, +0.036] — still does not exclude zero, and numerically the
+wrong sign this time (though not significantly).
+
+### Reading — the cleanest version of this session's finding
+
+**Both arms rose together, substantially, over the M=1 pipeline** (search 0.304→0.375, random
+0.268→0.393) — because `random_perturb` is evaluated at the *same* critic-selected window as
+`search`, and a genuinely better-positioned window (confirmed: best-of-3 IoU is 18% higher than
+top-1) helps *any* action taken there, edited or randomly perturbed. Giving the pipeline more
+chances to find a good window worked exactly as the free screen predicted — absolute outcomes
+improved for both arms. It did not, even slightly, make the specific edit preferably better
+than a same-sized random nudge at that window.
+
+This is the sharpest statement this session can make of its own central finding: **across every
+window source tried (heuristic, single probe, top-3 probe) and every stage-2 strategy tried
+(goal-distance, critic-as-objective, critic-as-reranker, ensemble-driven generation, now
+multi-window selection), nothing has made the *direction* of an edit differentially better than
+a magnitude-matched random one — only *where* to look has ever moved a number, and it moves
+both arms equally.** Ten independent replayed non-oracle configurations this session, zero
+distinguishing search from random; the one axis that reliably changes outcomes (window
+quality) does not discriminate between them.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged.
+
+### Assessment — this is where autonomous iteration within existing infrastructure stops
+
+Every structurally distinct idea this project's own tooling supports has now been tried: more
+data (two forms), probe ensembling, top-M window selection, a learned critic used three
+different ways, and ensemble-driven candidate generation. All ten deployable configurations are
+null against `random_perturb`, and the top-M result specifically rules out "the selector just
+isn't trying hard enough to find a good window" — it *does* find better windows, and it still
+doesn't matter for which edit gets chosen there. That is a meaningfully stronger and more
+specific negative finding than "nothing worked": it says the learned signal that exists (real,
+per the ceiling test and the critic's above-chance ranking accuracy) is about *where* something
+went wrong, not about *what would have fixed it* — and no amount of recombining this session's
+existing pieces changes that. What would require either the multi-day task 1/2 expansion or a
+method not yet conceived; both are the user's call, not something to keep improvising toward.
+
+---
+
+## 2026-08-11 — Synthesis: C1 is a negative result. Complete evidence, in one place.
+
+Per SPEC.md §0: "If C1 fails, the project is a negative result about world-model fidelity and
+should be written up as such. That is a real result and a better project than a fabricated
+positive." This entry is that writeup for C1. It does not re-derive anything — every number
+below is already on record earlier in this file — it exists so the finding can be read as one
+argument instead of reconstructed from ~15 chronological entries.
+
+### The claim being evaluated
+
+SPEC.md §0, C1: "Counterfactual edits found in a world model replay successfully in sim at a
+rate far above a random-perturbation baseline of equal edit budget." Concretely: does `search`
+(any variant built) beat `random_perturb` (magnitude-matched, same window) with a bootstrap CI
+excluding zero, **without using information a deployed method would not have** — i.e. without
+the ground-truth fault window.
+
+### All non-oracle configurations tested, K=8
+
+| Window source | Stage-2 strategy | RSR search | RSR random | diff | 95% CI | excl. 0 |
+|---|---|---|---|---|---|---|
+| Divergence heuristic (G3, 2026-08-05) | goal-distance | 0.00–0.10 | ~0.00–0.10 | 0.00 to +0.10 | incl. 0 at every λ | no |
+| Divergence heuristic | critic-as-objective | 0.018–0.054 | 0.018–0.036 | −0.018 to +0.036 | incl. 0 at every λ | no |
+| LOEO probe (56 ep., `ceiling-test-v2`) | goal-distance | 0.214–0.304 | 0.321–0.357 | −0.125 to −0.054 | incl. 0 at every λ | no |
+| LOEO probe (56 ep.) | critic-as-objective | 0.321–0.339 | 0.321–0.357 | −0.054 to +0.018 | incl. 0 at every λ | no |
+| LOEO probe (56 ep.) | critic-as-reranker | 0.357 | 0.321 | +0.036 | [−0.036, +0.107] | no |
+| LOEO probe (160 ep., `ceiling-test-v3-expanded`) | critic-as-reranker | 0.304 | 0.268 | +0.036 | [−0.036, +0.107] | no |
+| LOEO probe (160 ep.) | **4-model ensemble generation** + critic-reranker | 0.304 | 0.268 | +0.036 | [−0.036, +0.107] | no |
+| **Top-3 LOEO probe windows** | critic-reranker over M×4 candidates | 0.375 | 0.393 | **−0.018** | [−0.071, +0.036] | no |
+
+**Eight distinct configurations across two independently-varied axes (window source × stage-2
+strategy), n=56 or n=10→56-corrected in every case, zero exclude zero.** Two further candidate
+improvements (more critic training data, 56→106 episodes; probe seed-ensembling, 1→5 seeds)
+were screened with no new simulation and **did not clear their own screens** — the primary
+metric moved the wrong way or stayed flat in both — so no replay budget was spent on them.
+
+### The one configuration that worked, and exactly why it doesn't count
+
+| Window source | Stage-2 strategy | RSR search | RSR random | diff | 95% CI | excl. 0 |
+|---|---|---|---|---|---|---|
+| **Ground truth (oracle)** | critic-as-reranker | **0.643** | 0.375–0.393 | **+0.25 to +0.27** | **excludes 0** | **YES** |
+| Ground truth (oracle) | goal-distance | 0.375–0.536 | 0.393–0.411 | −0.018 to +0.125 | incl. 0 at 2/3 λ | no |
+
+Critic-as-reranker at the ground-truth window is real (bootstrap CI, independently cross-checked
+by McNemar, p=0.041, one-directional: 6 episodes fixed, 0 broken). It is excluded from C1 by
+construction: the window is the injection record, which a deployed method never has. It is the
+existence proof that the *mechanism* (learned critic selecting among CEM's own candidates) can
+work — the top-M probe-window test (above) shows directly that giving it a *better window*
+closes most of the absolute-rate gap to the oracle case (0.357→0.375, vs the oracle's 0.643) but
+not the *relative* gap to `random_perturb`, because `random_perturb` benefits from a better
+window exactly as much as `search` does.
+
+### What is real, and what isn't
+
+**Real:** the encoder's latents contain genuine, above-chance information about *where* a fault
+occurred. The ceiling test (2026-08-10) established this with a confound explicitly ruled out
+(a position-only control scored exactly at chance, AUROC 0.42–0.48, while the content-based
+probe reached AUROC 0.88–0.92) and confirmed it improves with more data for this sub-problem
+specifically (IoU 0.236→0.263, 56→160 episodes). The critic's above-chance ranking accuracy
+(0.62–0.71 across every measurement this project has made) is the same kind of signal applied to
+candidate quality rather than fault location.
+
+**Not established, despite direct and repeated testing:** that this signal is strong enough, or
+usable in a way this project's search machinery can extract, to make a *chosen* edit reliably
+better than a *random* edit of the same size. Every attempt to convert real, above-chance,
+statistically-detectable signal into a replay-verified edit-selection win fell short of
+`random_perturb`, including the two attempts (critic-as-reranker, top-M windows) built
+specifically to route around the two failure modes diagnosed earlier — argmin optimisation
+exploiting model error (2026-08-06), and a retrospective window heuristic that fires too late
+(2026-08-05/06).
+
+### Scope of what this negative result does and does not cover
+
+- **Task and data scope.** `libero_object` task 0 only, 160 injected failures (up from the
+  original 56), one dynamics model family (with a 4-member ensemble variant tried), one encoder.
+  The task 1/2 expansion (queued, stalled by hardware crashes, never completed) is untested and
+  would be a materially larger and more diverse data source than anything tried here.
+- **Cause generalisation untested.** Every localisation and critic result is validated by
+  leave-one-*episode*-out, never leave-one-*cause*-out — generalisation to an injected cause the
+  method has zero examples of has not been measured.
+- **Not a formal proof.** This is a resource-bounded empirical case: ten configurations,
+  several with independent prior validation of their components elsewhere in this exact
+  codebase, all null. It is evidence that the readily-available technique space is exhausted,
+  not a proof that no technique could work.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6).** Unchanged by this entry — it synthesises,
+it does not re-run anything.
+
+### Recommendation
+
+Per SPEC.md §0's own framing, this stands as the project's C1 finding: **the world model, at
+its current data scale and with every search/selection strategy this project's infrastructure
+supports, does not produce edits that beat random perturbation without oracle knowledge of the
+fault location — while the same infrastructure demonstrates that the underlying latents do carry
+real, extractable information about fault location, and that a learned selector can exploit real
+signal when given the true window.** That combination — real localisation signal, no
+demonstrated way to turn it into a better *edit* — is itself the specific, falsifiable content of
+the negative result, not merely its absence of a positive one.
+
+### Addendum — no window-quality threshold effect either, closing off the last open hypothesis
+
+One hypothesis the synthesis above left standing: maybe the deployable-window results are null
+only because no run happened to land a *good enough* window, and the gap would open up
+continuously as localisation improves, short of the ground truth. Free to check — every
+deployable-pipeline episode replayed this session is an injected failure with a known true
+window, so the *realized* IoU of whatever window each run actually used is computable post hoc,
+with zero new simulation.
+
+Pooled all three probe-window deployable runs (`p35-critic-rerank-probe-window-v2/v3`,
+`p35-critic-topm-probe-window`; 168 episode-instances, realized IoU 0.00–0.53) and split at the
+median (0.217):
+
+| | n | RSR search | RSR random | diff | 95% CI | excl. 0 |
+|---|---|---|---|---|---|---|
+| Good window (IoU > median) | 81 | 0.321 | 0.309 | +0.012 | [−0.049, +0.074] | no |
+| Bad window (IoU ≤ median) | 87 | 0.368 | 0.345 | +0.023 | [−0.023, +0.069] | no |
+| IoU > 0.3 | 76 | 0.329 | 0.316 | +0.013 | [−0.053, +0.079] | no |
+| IoU = 0 (window missed entirely) | 31 | 0.742 | 0.774 | −0.032 | [−0.097, +0.000] | no |
+
+**No threshold effect.** The best windows this project has actually achieved (up to IoU 0.53) show
+the same null result as the worst ones — window quality does not continuously gate the search-vs-
+random gap within the range reached here. (The IoU=0 group's high absolute rate on *both* arms is
+its own coherent finding, not a contradiction: a window that misses the fault entirely edits
+somewhere the fault isn't, which behaves like a near-no-op handed to the BC policy's own recovery
+— consistent with `no_edit`'s previously-measured ~0.48 rate at the true fault window.)
+
+This rules out "close, but not quite" as the reading of this session's results. The gap between
+the null deployable regime and the working oracle regime is not a smooth function of window IoU
+that this project's data has been climbing — it is a harder discontinuity, or driven by
+something other than window quality alone. Either way, it means further marginal
+localisation improvements are not, by themselves, a promising next lever — which sharpens rather
+than reopens the recommendation above.
+
+---
+
+## 2026-08-11 — Session closed: C1 is a negative result, by explicit decision
+
+Presented with the full picture — ten independently replayed non-oracle configurations, the
+one working (oracle-only) configuration and exactly why it doesn't transfer, the window-quality
+stratification ruling out "just needs to be a bit better," and the honest scope limits
+(cause generalisation and the task 1/2 expansion, both untested, both real commitments) — the
+user chose to close C1 as the negative result rather than pursue any of the three remaining
+threads this session identified. `CLAUDE.md`'s "Where the project actually stands" and
+"Ideas considered and analysed" sections are updated to carry this forward; `WORKFLOW.md`'s P4
+prompt is flagged so a future session does not paste it in assuming C1 succeeded.
+
+**No gate, threshold, metric, or the replay protocol was changed at any point this session.**
+`cfe/eval/` was never touched. Every number in the synthesis above came from `run_replay.py`
+(CLAUDE.md rule 2); every diagnostic that wasn't a replayed result is explicitly labelled
+`diagnostic: true` with a `not_a_result` string saying why. `CHANGELOG.md` needs no entry: no
+threshold moved, no criterion was relaxed, nothing frozen was edited. The two config surfaces
+touched (`inject.per_cause_per_task`, dynamics-ensemble membership) were both exercised through
+CLI overrides specifically to leave the checked-in defaults — and the plan they encode for the
+task 1/2 expansion — undisturbed.
+
+**What this session leaves behind, concretely, for whoever picks this up next:**
+
+- `cfe/search/critic.py` — a trained, checkpointed, tested critic (`results/runs/p35-critic/`)
+  and the library code to train, save, load, and wire a new one into `cem_search` via
+  `evaluate_fn`, reusable regardless of what happens to C1.
+- `scripts/diagnose_fault_localization.py` — the fault-localisation probe, now with `--n-seeds`
+  and `--top-m`, both additive and regression-tested against exact prior behaviour.
+- Six other new diagnostic scripts (`diagnose_window_probe.py`,
+  `diagnose_critic_quality.py`, `diagnose_critic_search.py`,
+  `diagnose_critic_rerank_probe_window.py`, `diagnose_ensemble_rerank_probe_window.py`,
+  `diagnose_critic_topm_probe_window.py`), each self-contained, each stamped `diagnostic: true`
+  and excluded from `configs/search.yaml:experiments` so none can leak into a gate.
+- The task-0 injected failure set, grown from 56 to 160 (`inject.per_cause_per_task` 14→40 via
+  CLI override), immediately available to any future critic or localisation work on this task.
+- 292 tests passing, `make lint` clean, nothing uncommitted that isn't intentional working-tree
+  state — the repository is in the same verified condition it was in at every checkpoint during
+  the session, not just at the end.
+
+### Gate state
+
+**G0: PASS. G1: PASS. G2: PASS. G3: FAIL (4/6) — C1 closed as a negative result.**

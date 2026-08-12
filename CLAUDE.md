@@ -237,8 +237,12 @@ sim roughly doubles each replay — and it halves what a single crash destroys.
 
 ## Where the project actually stands (read before proposing a fix)
 
-**G3 FAILed and the diagnosis is done.** Do not re-derive it. Full numbers in `PROGRESS.md`
-2026-08-05/06; the short version:
+**C1 is closed as a negative result (2026-08-11, by explicit decision after reviewing the full
+evidence). Do not re-derive it, and do not propose another search-method variant without
+reading `PROGRESS.md`'s 2026-08-11 synthesis entry first** — it is very likely already covered
+below or there.
+
+**The original Phase 3.5 diagnosis (2026-08-05/06), still the mechanism explanation:**
 
 - The search does not beat magnitude-matched `random_perturb`, **even when the edit window is
   forced to the true fault** (n=56, K=8: +0.125 / −0.018 / −0.018 across λ, no CI excluding
@@ -251,8 +255,44 @@ sim roughly doubles each replay — and it halves what a single crash destroys.
 - **The action-ignoring twin picks better windows than the trained model.** Divergence peaks
   where a fault's *consequences* appear (~52 steps late), so the trained model is
   systematically wrong; the blind model is merely arbitrary, and arbitrary wins.
-- Seed-ensembling helps a little (0.621 → 0.668, McNemar p=0.023). Mixing model *families*
-  (residual on/off) hurts badly (0.551). `residual: false` scored 0/120 cells.
+- Seed-ensembling the goal-distance objective helps a little (0.621 → 0.668, McNemar p=0.023).
+  Mixing model *families* (residual on/off) hurts badly (0.551). `residual: false` scored 0/120.
+
+**What the 2026-08-10/11 session added, and why it closes the question rather than reopening
+it.** It built exactly what the diagnosis above implied was worth trying — a leave-one-episode-
+out fault-localisation probe (real signal, confirmed against a position-only control, AUROC
+0.88–0.92) and a learned critic (`cfe/search/critic.py`) used three ways: as the objective, as a
+re-ranker over CEM's own candidates, and steering ensemble-driven candidate generation — then
+combined them with a better window (a probe, and a top-3-candidate version of it) in ten
+independently replayed, non-oracle configurations. **None beat `random_perturb` with a CI
+excluding zero.** A post-hoc stratification by realised window quality across 168
+episode-instances found no threshold effect: the best windows actually achieved (IoU up to
+0.53) score no better than the worst. The **only** configuration that worked — critic re-rank
+at the injection record's *ground-truth* window, +0.25–0.27 over random, CI excluding zero,
+independently confirmed by McNemar (p≈0.041, 6 episodes fixed, 0 broken) — is oracle-assisted by
+construction and stays that way; giving the same critic a materially better but still imperfect
+window (top-3 probe candidates) closed most of the *absolute*-rate gap to it but none of the
+*relative* gap to `random_perturb`, because `random_perturb` benefits from a better window
+exactly as much as `search` does. Two cheaper candidate improvements (more critic training
+data; probe seed-ensembling) were screened with no new simulation and didn't even clear their
+own screens, so no replay budget was spent on them. Full evidence table, every run ID, and the
+reasoning at each step: `PROGRESS.md` 2026-08-10/11, ending in the "Synthesis" entry and its
+addendum.
+
+**What is real and what still isn't, precisely:** the latents demonstrably carry information
+about *where* a fault is (localisation) and a learned critic demonstrably carries information
+about *which candidate is better* (ranking accuracy 0.62–0.71 across every measurement this
+project has made) — but no method built here converts either signal into an edit that beats a
+random one of the same size, without already knowing the fault window. That is the specific,
+falsifiable content of the negative result, not merely an absence of a positive one.
+
+**Untested, and known to be untested — not next steps to default into, but not ruled out
+either:** generalisation to an injected *cause* the method has zero training examples of (every
+result above is leave-one-*episode*-out, never leave-one-*cause*-out); and the SPEC §4.4
+`libero_object` task 1/2 expansion, queued since 2026-08-07 and confirmed (2026-08-11) to still
+be close to a full commitment — task 1 has only its demos cached, task 2 has nothing. Either is
+a real, multi-step undertaking, not a quick follow-up, and needs the user's sign-off before a
+session starts it.
 
 ## Ideas considered and analysed — do not re-propose without reading these
 
@@ -282,19 +322,22 @@ than a proxy.
 is in scope, cheap, and is where the value is concentrated. **Q as an actor** (generate the
 replacement) is out of scope and hits the OOD wall.
 
-*The cheap version, if pursued:* drop TD-learning entirely. Terminal-only reward means
-Monte-Carlo estimation, which is just supervised learning — fit `f(z_t, a_t) -> P(success)`
-with the episode outcome as the label. No bootstrapping, no Bellman instability, a small MLP
-head on cached latents.
+*The cheap version* — fit `f(z_t, a_t) -> P(success)` by Monte-Carlo supervised learning, a
+small head on cached latents, no TD, no Bellman instability — **was built and run
+(2026-08-10/11): `cfe/search/critic.py`.** Used as a critic (both as the objective and as a
+re-ranker over CEM's own candidates, never as an actor generating the edit itself, staying on
+the in-scope side of the split above) it clears its own ranking-accuracy screen and, at the
+*oracle* window, beats both the standard method and `random_perturb` with a CI excluding zero —
+but not at any deployable window tried. See "Where the project actually stands" above; do not
+rebuild this without reading that first.
 
-*The free experiment to run first — the ceiling test.* Every injected failure has its
-uncorrupted source demo **at the identical initial state**, and the true fault window is known,
-for 56 pairs. Train a classifier to separate clean from corrupted per timestep and measure
-window IoU against those known windows. It is oracle-assisted and not deployable, but it
-answers the question underneath all of this: **do these latents contain enough information to
-localise a fault at all?** If no, no window-selection method can work and the negative result
-is far stronger. If yes, divergence is simply the wrong readout. Pure GPU on cached latents,
-no simulation.
+*The free experiment named here — the ceiling test — was run (2026-08-10) and answered.*
+**Yes**, the latents contain real, above-chance information about where a fault is: a
+leave-one-episode-out probe reached AUROC 0.88–0.92 against a position-only control that scored
+at chance, confirmed it wasn't a timing artefact, and improved further with more data. Divergence
+is confirmed to be the wrong readout, exactly as this entry predicted — but a better readout
+(the probe, then a top-3 version of it) raised absolute outcomes without closing the gap to
+`random_perturb`. Full detail: `PROGRESS.md` 2026-08-10/11.
 
 ## Scope discipline
 

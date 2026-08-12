@@ -106,8 +106,19 @@ def cem_search(
     lam: float,
     cfg: CEMConfig,
     rng: np.random.Generator,
+    evaluate_fn=evaluate_candidates,
 ) -> CEMResult:
-    """Cross-entropy method over the `K x 7` window, warm-started at the executed actions."""
+    """Cross-entropy method over the `K x 7` window, warm-started at the executed actions.
+
+    `evaluate_fn` defaults to the frozen-adjacent `D(z_end, z_goal) + lam * penalty` objective
+    and every existing caller omits it, so nothing here changes their behaviour. It exists so an
+    alternative scoring function — e.g. `cfe/search/critic.py`'s learned `1 - P(success)` — can
+    reuse this exact optimisation loop (sampling, elite refit, the gripper-flip handling) rather
+    than duplicating it, matching `evaluate_candidates`'s interface: `(model, problem,
+    window_start, candidates, lam) -> dict` with `objective`, `goal_distance`, `penalty` and
+    `n_forward_passes` keys. `model` is passed through opaquely — for a non-default `evaluate_fn`
+    it need not be a bare dynamics model, only whatever that function expects.
+    """
     original = problem.actions[window_start : window_start + budget_k].astype(np.float64)
     if original.shape != (budget_k, ACTION_DIM):
         raise ValueError(
@@ -131,7 +142,7 @@ def cem_search(
 
     for it in range(cfg.n_iters):
         cand = _sample(original, mean, std, flip_prob, cfg.population, rng)
-        out = evaluate_candidates(model, problem, window_start, cand, lam)
+        out = evaluate_fn(model, problem, window_start, cand, lam)
         n_fwd += out["n_forward_passes"]
         j = out["objective"]
         # Candidate 0 is the warm start, so its J is the do-nothing reference every iteration.
@@ -226,16 +237,17 @@ def search_episode(
     lam: float,
     cfg: CEMConfig,
     rng: np.random.Generator,
+    evaluate_fn=evaluate_candidates,
 ) -> CEMResult | None:
     """Run stage 2 on each stage-1 candidate window and keep the best by `J`.
 
     Returns `None` when stage 1 produced no usable window — for instance an episode too short
     to leave a whole chunk after the window. Reported as a gap rather than filled with a
-    fabricated window.
+    fabricated window. `evaluate_fn` is forwarded to `cem_search`; see its docstring.
     """
     best: CEMResult | None = None
     for cand in ranked_windows:
-        res = cem_search(model, problem, cand["window_start"], budget_k, lam, cfg, rng)
+        res = cem_search(model, problem, cand["window_start"], budget_k, lam, cfg, rng, evaluate_fn)
         if best is None or res.objective < best.objective:
             best = res
     return best
