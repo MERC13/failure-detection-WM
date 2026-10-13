@@ -8,7 +8,7 @@ simulation?
 
 **No, not yet — and this repo now says so precisely instead of quietly.**
 
-The world model's latents *do* contain real, verified information about **where** a policy
+A probe on the frozen encoder's latents finds real, verified information about **where** a policy
 went wrong (fault localization: AUROC 0.88–0.92, confirmed against a control that scores at
 chance). A learned critic *does* carry real signal about **which candidate edit is better**
 (ranking accuracy 0.62–0.71, consistently above the 0.50 coin-flip line). But across **eight
@@ -22,6 +22,9 @@ That combination — real, measurable signal about the problem, no demonstrated 
 into a *fix* — is the actual finding. Full evidence, every run ID, every rejected alternative:
 [`PROGRESS.md`](PROGRESS.md) — search it for *"Synthesis: C1 is a negative result"*
 (2026-08-11), the entry that pulls the full session's evidence into one place.
+
+Six summary statements in this README, `PROGRESS.md` and `CHANGELOG.md` did not match the log's
+own dated measurements; see [Corrections (2026-10-12)](PROGRESS.md#corrections-2026-10-12).
 
 ## What this project does
 

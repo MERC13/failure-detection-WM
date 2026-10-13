@@ -6,6 +6,62 @@ touches `cfe/eval/`.
 
 ---
 
+## Corrections (2026-10-12)
+
+**Changed.** Six summary statements in `PROGRESS.md`, this file and `README.md` were checked
+against the dated measurements in `PROGRESS.md` on 2026-10-12 and do not match them. They are
+listed below and in the section of the same name at the end of `PROGRESS.md`; nothing earlier in
+either file was rewritten, and `README.md` is corrected in place (C6). Locations are file and
+line numbers at commit `b50bc2a` (b50bc2a689d0ccee66b0908a2fd3f0dfd2074f7f). The labels C1–C6
+number these corrections only; they are not SPEC.md's claims C1 and C2.
+
+1. **C1, oracle window with the goal-distance objective.** The 2026-08-11 synthesis gives its CI
+   as "incl. 0 at 2/3 λ" (PROGRESS.md L2633). The dated measurement, the 2026-08-06
+   window-oracle ablation at n=56, shows all three intervals include 0: [−0.036, +0.304] at
+   λ=0.01, [−0.161, +0.143] at λ=0.1 and [−0.125, +0.089] at λ=1.0 (PROGRESS.md L1502–1508).
+2. **C2, number of non-oracle configurations.** The scope note says "ten configurations, ...
+   all null" (PROGRESS.md L2672–2674) and the close-out says "ten independently replayed
+   non-oracle configurations" (PROGRESS.md L2731). The same count appears at PROGRESS.md L2569
+   ("Ten independent replayed non-oracle configurations this session"), at L2581–2582 ("All ten
+   deployable configurations are null against `random_perturb`") and in CLAUDE.md L265–266. The
+   synthesis table "All non-oracle configurations tested, K=8" lists eight (PROGRESS.md
+   L2609–2620), and the sentence under it says "Eight distinct configurations" (L2622). The two
+   oracle rows are listed separately (L2632–2633), and the two further candidate improvements
+   were screened with no new simulation, so no replays were run for them (L2623–2626). The
+   replayed non-oracle configurations number eight.
+3. **C3, the G1 interval.** CHANGELOG.md says "The CI's lower bound clears 0.70, so this is a
+   real value, not sampling noise" (CHANGELOG.md L192–193), and PROGRESS.md says "The lower
+   bound is above 0.70" (PROGRESS.md L369–370). The interval both record is Wilson 95% CI
+   [0.583, 0.825] for 36 of 50 (CHANGELOG.md L192, PROGRESS.md L369, also README.md L183). Its
+   lower bound, 0.583, is below 0.70, so the interval overlaps the old 40–70% band; only the 72%
+   point estimate is above it.
+4. **C4, sample size of the first synthesis row.** The synthesis says "n=56 or
+   n=10→56-corrected in every case" (PROGRESS.md L2622–2623). Its first row, the divergence
+   heuristic with the goal-distance objective (L2613), has one dated run: the G3 gate on 10
+   injected failures (PROGRESS.md L1368–1374). Its n is 10.
+5. **C5, G3 pre-registration.** CHANGELOG.md says the G3 criteria "were written and committed
+   **before any search was run and before any replay number existed**" (CHANGELOG.md L72–73).
+   PROGRESS.md says the same (L1256–1257) and that they "were pre-registered in
+   `configs/search.yaml` before any search ran" (L1354–1355). In git, `configs/search.yaml`,
+   which holds the six G3 checks, and `scripts/verify_g3.py` first appear in commit `c04cfef`,
+   the same commit that adds the G3 result to PROGRESS.md and CHANGELOG.md, so the commit
+   history cannot confirm the order. What git does show: the SPEC.md-level G3 criterion is in
+   the first commit (`8b8a80c`, SPEC.md L298–302) and is byte-identical at `b50bc2a` (SPEC.md
+   L405–409).
+6. **C6, the README's credit for fault localisation.** README.md credited fault localisation
+   (AUROC 0.88–0.92) to "The world model's latents" (README.md L11–12); in this repo "the world
+   model" is the latent dynamics model (README.md L74). PROGRESS.md credits a probe on the
+   frozen encoder's latents: "the encoder's latents contain genuine, above-chance information
+   about *where* a fault occurred", and "the content-based probe reached AUROC 0.88–0.92"
+   (PROGRESS.md L2646–2649). The probe is the ceiling test's leave-one-episode-out probe on
+   `z_t` (PROGRESS.md L1683). The README sentence is corrected in place in the same commit as
+   this section.
+
+**Prior results affected.** None. No measurement, metric, threshold, gate, or the replay
+protocol changed; only summary text that disagreed with the measurements is corrected.
+
+---
+
 ## 2026-08-07 — SPEC §4.2 rollout-loss horizon and §5 `D` are amended (approved by the user)
 
 **Changed.** Two SPEC sections, both approved before any of the work below was run.
